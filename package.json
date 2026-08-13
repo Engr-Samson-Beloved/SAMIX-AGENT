@@ -22,6 +22,7 @@
     "test": "pnpm build:packages && node --test \"packages/core/test/**/*.test.ts\"",
     "test:watch": "node --test --watch \"packages/core/test/**/*.test.ts\"",
     "smoke": "pnpm build:packages && node scripts/smoke-core.mjs",
+    "repl": "pnpm build:packages && node scripts/repl.mjs",
     "icons": "node scripts/generate-icons.mjs",
     "dev:core": "pnpm --filter @samix/core dev",
     "dev:ui": "pnpm --filter @samix/desktop dev",
