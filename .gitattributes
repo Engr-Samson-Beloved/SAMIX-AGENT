@@ -1,0 +1,23 @@
+# Normalise line endings.
+#
+# Development is on Windows but the toolchain (Node, Rust, CI) is cross
+# platform. Storing LF in the repository and letting Git handle the working
+# copy avoids whole-file diffs when a contributor on another OS touches a file.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF or cmd.exe mis-parses them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets — never normalise, never diff as text.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
+
+# Generated; keep them out of diff noise and out of language statistics.
+pnpm-lock.yaml -diff linguist-generated
+apps/desktop/src-tauri/Cargo.lock -diff linguist-generated
