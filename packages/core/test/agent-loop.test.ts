@@ -1,0 +1,423 @@
+import { afterEach, beforeEach, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { z } from 'zod';
+import { err, ok, verification, type AgentEvent, type AgentTool } from '@samix/shared';
+import { createRuntime, type PlanResult, type Planner, type Runtime } from '../dist/index.js';
+import { excludes, includes, matchObject, readNdjson, tempDir } from './helpers.ts';
+
+/**
+ * End-to-end tests of the agent loop.
+ *
+ * This is the Phase 1 test that matters most: it drives a REAL runtime — real
+ * config, permission engine, executor, verification, audit trail and event bus —
+ * and asserts the guarantees the whole design exists to provide. Only the
+ * planner is substituted, so plans are deterministic and no network is involved.
+ *
+ * Everything runs against a temp directory (spec §69).
+ */
+
+let dir: string;
+let cleanup: () => void;
+let runtime: Runtime | undefined;
+
+beforeEach(() => {
+  ({ dir, cleanup } = tempDir('samix-agent-'));
+});
+
+afterEach(() => {
+  runtime?.shutdown();
+  runtime = undefined;
+  cleanup();
+});
+
+/** A planner that always returns the same plan. */
+function fixedPlanner(result: PlanResult): Planner {
+  return { name: 'fixed (test)', plan: () => Promise.resolve(result) };
+}
+
+/** Build a runtime, optionally with a substitute planner and extra tools. */
+function build(options: { planner?: Planner; tools?: AgentTool<never, unknown>[] } = {}): Runtime {
+  const rt = createRuntime({
+    dataDir: dir,
+    logToStderr: false,
+    ...(options.planner ? { planner: () => options.planner! } : {}),
+  });
+  for (const tool of options.tools ?? []) rt.registry.register(tool);
+  runtime = rt;
+  return rt;
+}
+
+/** Record all events and resolve when the task reaches a terminal state. */
+function watch(rt: Runtime): { events: AgentEvent[]; done: Promise<AgentEvent> } {
+  const events: AgentEvent[] = [];
+  const done = new Promise<AgentEvent>((resolve) => {
+    rt.bus.onAny((event) => {
+      events.push(event);
+      if (
+        event.type === 'task.completed' ||
+        event.type === 'task.failed' ||
+        event.type === 'task.cancelled'
+      ) {
+        resolve(event);
+      }
+    });
+  });
+  return { events, done };
+}
+
+const types = (events: AgentEvent[]): string[] => events.map((e) => e.type);
+
+// A step plan pointing at one tool.
+const planFor = (tool: string, description = 'do the thing'): PlanResult => ({
+  kind: 'steps',
+  steps: [{ description, tool, input: {} }],
+});
+
+// ---------------------------------------------------------------------------
+
+describe('the Phase 1 loop, end to end', () => {
+  it('runs a real tool and reports a verified result', async () => {
+    const rt = build();
+    const { events, done } = watch(rt);
+    rt.agent.start();
+
+    const { taskId } = rt.agent.submit('what system am I on?', 'text');
+    const outcome = await done;
+
+    assert.equal(outcome.type, 'task.completed');
+    for (const expected of [
+      'task.created',
+      'agent.plan.created',
+      'tool.started',
+      'tool.completed',
+      'tool.verified',
+    ]) {
+      includes(types(events), expected, 'event stream');
+    }
+
+    const task = rt.tasks.find(taskId);
+    assert.equal(task?.status, 'completed');
+    assert.equal(task?.steps[0]?.tool, 'system.getInfo');
+    assert.equal(task?.steps[0]?.status, 'succeeded');
+  });
+
+  it('returns the agent to idle so the next instruction is accepted', async () => {
+    const rt = build();
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('status', 'text');
+    await done;
+
+    assert.equal(rt.agent.state, 'idle');
+    assert.doesNotThrow(() => rt.agent.submit('status', 'text'));
+  });
+
+  /** One machine, one desktop: concurrent automation is a correctness hazard. */
+  it('refuses a second concurrent task rather than queueing it', () => {
+    const rt = build({ planner: { name: 'slow', plan: () => new Promise<PlanResult>(() => {}) } });
+    rt.agent.start();
+    rt.agent.submit('first', 'text');
+    assert.throws(() => rt.agent.submit('second', 'text'), /already running/);
+  });
+
+  it('answers honestly when it does not understand, instead of inventing a plan', async () => {
+    const rt = build();
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('reticulate the splines on my quantum flux capacitor', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed');
+    assert.match((outcome as { summary: string }).summary, /don't yet understand/i);
+  });
+});
+
+describe('the verification guarantee (spec §29, development rule 25)', () => {
+  /**
+   * The central promise of the product: when the tool claims success but the
+   * world disagrees, the world wins and the agent reports failure.
+   */
+  it('fails a step whose verifier contradicts the tool', async () => {
+    const lying: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.lie',
+      description: 'A tool that claims success while changing nothing at all.',
+      permission: 'write',
+      reversibility: 'reversible',
+      inputSchema: z.object({}),
+      verification: 'explicit',
+      execute: () => Promise.resolve(ok({ claimed: 'done' })),
+      verify: () => Promise.resolve(verification('failed', 'Destination does not exist.')),
+    };
+
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.lie', 'pretend to copy')),
+      tools: [lying as unknown as AgentTool<never, unknown>],
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('copy the thing', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.failed');
+    assert.equal((outcome as { error: { code: string } }).error.code, 'VERIFICATION_FAILED');
+  });
+
+  it('marks a step succeeded_unverified when the verifier cannot run', async () => {
+    const unverifiable: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.unverifiable',
+      description: 'A tool whose verification step fails when it is attempted.',
+      permission: 'write',
+      reversibility: 'reversible',
+      inputSchema: z.object({}),
+      verification: 'explicit',
+      execute: () => Promise.resolve(ok({ done: true })),
+      verify: () => Promise.reject(new Error('cannot reach the target to check')),
+    };
+
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.unverifiable')),
+      tools: [unverifiable as unknown as AgentTool<never, unknown>],
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('do it', 'text');
+
+    await done;
+    const task = rt.tasks.find(taskId);
+    assert.equal(task?.steps[0]?.status, 'succeeded_unverified');
+    assert.match(
+      task?.summary ?? '',
+      /could not confirm/i,
+      'the summary must not claim an unverified step succeeded',
+    );
+  });
+});
+
+describe('permissions and confirmation', () => {
+  const externalTool: AgentTool<Record<string, never>, unknown> = {
+    name: 'demo.sendMessage',
+    description: 'Pretends to send a message to an external recipient, for testing.',
+    permission: 'external',
+    reversibility: 'irreversible',
+    inputSchema: z.object({}),
+    verification: 'explicit',
+    execute: () => Promise.resolve(ok({ sent: true })),
+    verify: () => Promise.resolve(verification('verified', 'Message appears in the conversation.')),
+    describeEffect: () => 'Send a message to Charles',
+  };
+
+  const buildExternal = (): Runtime =>
+    build({
+      planner: fixedPlanner(planFor('demo.sendMessage', 'send it')),
+      tools: [externalTool as unknown as AgentTool<never, unknown>],
+    });
+
+  it('pauses for confirmation before an external action', async () => {
+    const rt = buildExternal();
+    rt.agent.start();
+
+    const requested = rt.bus.waitFor('confirmation.required', 5000);
+    rt.agent.submit('send it', 'text');
+    const event = await requested;
+
+    assert.equal(event.request.tool, 'demo.sendMessage');
+    assert.equal(event.request.effect, 'Send a message to Charles');
+    assert.equal(rt.agent.state, 'awaiting_confirmation');
+  });
+
+  it('executes after approval', async () => {
+    const rt = buildExternal();
+    const { done } = watch(rt);
+    rt.agent.start();
+
+    const requested = rt.bus.waitFor('confirmation.required', 5000);
+    rt.agent.submit('send it', 'text');
+    const { request } = await requested;
+    rt.agent.respondToConfirmation({ id: request.id, approved: true, approveRemainingInTask: false });
+
+    assert.equal((await done).type, 'task.completed');
+  });
+
+  it('does not execute when the user declines', async () => {
+    const rt = buildExternal();
+    const { events, done } = watch(rt);
+    rt.agent.start();
+
+    const requested = rt.bus.waitFor('confirmation.required', 5000);
+    const { taskId } = rt.agent.submit('send it', 'text');
+    const { request } = await requested;
+    rt.agent.respondToConfirmation({ id: request.id, approved: false, approveRemainingInTask: false });
+
+    await done;
+    excludes(types(events), 'tool.started', 'event stream');
+    assert.equal(rt.tasks.find(taskId)?.status, 'cancelled');
+  });
+
+  it('blocks the action outright in SAFE mode, without even prompting', async () => {
+    const rt = buildExternal();
+    rt.config.update({ automation: { mode: 'safe' } });
+    const { events, done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('send it', 'text');
+
+    assert.equal((await done).type, 'task.failed');
+    includes(types(events), 'permission.denied', 'event stream');
+    excludes(types(events), 'confirmation.required', 'event stream');
+    excludes(types(events), 'tool.started', 'event stream');
+  });
+});
+
+describe('cancellation and emergency stop', () => {
+  it('emergency stop cancels an in-flight task and latches the agent closed', () => {
+    const rt = build({ planner: { name: 'hanging', plan: () => new Promise<PlanResult>(() => {}) } });
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('something long', 'text');
+
+    const result = rt.agent.emergencyStop();
+    assert.equal(result.stopped, true);
+    assert.equal(result.cancelledTaskId, taskId);
+    assert.equal(rt.agent.isStopped, true);
+    assert.throws(() => rt.agent.submit('another', 'text'), /emergency stop/i);
+
+    rt.agent.resume();
+    assert.doesNotThrow(() => rt.agent.submit('another', 'text'));
+  });
+
+  /** A pending confirmation must never be able to wedge the agent forever. */
+  it('cancels a task that is waiting on confirmation', async () => {
+    const external: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.external',
+      description: 'An external-permission tool used to exercise the confirmation gate.',
+      permission: 'external',
+      reversibility: 'irreversible',
+      inputSchema: z.object({}),
+      verification: 'explicit',
+      execute: () => Promise.resolve(ok({})),
+      verify: () => Promise.resolve(verification('verified', 'ok')),
+      describeEffect: () => 'Do an external thing',
+    };
+
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.external', 'external step')),
+      tools: [external as unknown as AgentTool<never, unknown>],
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+
+    const requested = rt.bus.waitFor('confirmation.required', 5000);
+    rt.agent.submit('do it', 'text');
+    await requested;
+
+    rt.agent.cancel('user pressed stop');
+    assert.equal((await done).type, 'task.cancelled');
+  });
+});
+
+describe('failure reporting', () => {
+  it('reports a tool failure without claiming success', async () => {
+    const failing: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.fails',
+      description: 'A tool that always fails, used to exercise the failure path.',
+      permission: 'read',
+      reversibility: 'reversible',
+      inputSchema: z.object({}),
+      verification: 'intrinsic',
+      execute: () => Promise.resolve(err('FILE_NOT_FOUND', 'No such file.', { recoverable: false })),
+    };
+
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.fails', 'find the file')),
+      tools: [failing as unknown as AgentTool<never, unknown>],
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('find it', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.failed');
+    assert.equal((outcome as { error: { code: string } }).error.code, 'FILE_NOT_FOUND');
+    assert.match((outcome as { summary: string }).summary, /could not complete/i);
+  });
+
+  it('rejects a plan that references an unregistered tool', async () => {
+    const rt = build({ planner: fixedPlanner(planFor('demo.nonexistent', 'do magic')) });
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('go', 'text');
+
+    assert.equal((await done).type, 'task.failed');
+  });
+
+  /** Policy must never be decided about input whose real effect is unknown. */
+  it('rejects malformed tool input before any tool runs', async () => {
+    const strict: AgentTool<{ count: number }, unknown> = {
+      name: 'demo.strict',
+      description: 'A tool with a strict input schema, for validation testing purposes.',
+      permission: 'read',
+      reversibility: 'reversible',
+      inputSchema: z.object({ count: z.number() }),
+      verification: 'intrinsic',
+      execute: () => Promise.resolve(ok({})),
+    };
+
+    const rt = build({
+      planner: fixedPlanner({
+        kind: 'steps',
+        steps: [{ description: 'bad input', tool: 'demo.strict', input: { count: 'lots' } }],
+      }),
+      tools: [strict as unknown as AgentTool<never, unknown>],
+    });
+    const { events, done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('go', 'text');
+
+    await done;
+    excludes(types(events), 'tool.started', 'event stream');
+  });
+});
+
+describe('the audit trail (spec §37)', () => {
+  it('records every tool execution', async () => {
+    const rt = build();
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('what system am I on?', 'text');
+    await done;
+    rt.shutdown();
+    runtime = undefined;
+
+    const records = await readNdjson(path.join(dir, 'logs', 'audit.log'));
+    assert.ok(records.length > 0);
+    matchObject(records[0], { tool: 'system.getInfo', outcome: 'success', permission: 'read' });
+  });
+
+  it('records a policy refusal, not just successes', async () => {
+    const external: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.blocked',
+      description: 'An external tool used to verify that refusals reach the audit trail.',
+      permission: 'external',
+      reversibility: 'irreversible',
+      inputSchema: z.object({}),
+      verification: 'explicit',
+      execute: () => Promise.resolve(ok({})),
+      verify: () => Promise.resolve(verification('verified', 'ok')),
+      describeEffect: () => 'Do something external',
+    };
+
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.blocked')),
+      tools: [external as unknown as AgentTool<never, unknown>],
+    });
+    rt.config.update({ automation: { mode: 'safe' } });
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('go', 'text');
+    await done;
+    rt.shutdown();
+    runtime = undefined;
+
+    const records = await readNdjson(path.join(dir, 'logs', 'audit.log'));
+    matchObject(records[0], { tool: 'demo.blocked', outcome: 'blocked' });
+  });
+});

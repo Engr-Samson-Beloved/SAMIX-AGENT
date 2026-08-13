@@ -1,0 +1,43 @@
+{
+  "name": "samix-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SAMIX Agent - local-first autonomous Windows computer agent",
+  "author": "SamixTech",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "check:prereqs": "node scripts/check-prereqs.mjs",
+    "build": "pnpm -r --filter \"./packages/*\" build && pnpm --filter @samix/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build:packages": "pnpm --filter @samix/shared build && pnpm --filter @samix/core build",
+    "test": "pnpm build:packages && node --test \"packages/core/test/**/*.test.ts\"",
+    "test:watch": "node --test --watch \"packages/core/test/**/*.test.ts\"",
+    "smoke": "pnpm build:packages && node scripts/smoke-core.mjs",
+    "icons": "node scripts/generate-icons.mjs",
+    "dev:core": "pnpm --filter @samix/core dev",
+    "dev:ui": "pnpm --filter @samix/desktop dev",
+    "dev:browser": "node scripts/dev-browser.mjs",
+    "tauri": "pnpm --filter @samix/desktop tauri",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2"
+  }
+}
