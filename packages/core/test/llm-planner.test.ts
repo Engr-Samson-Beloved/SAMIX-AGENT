@@ -145,7 +145,11 @@ describe('LlmPlanner.plan', () => {
     assert.equal(result.kind, 'steps');
     assert.equal(result.steps.length, 1);
     matchObject(result.steps[0]!, { tool: 'system.getInfo', input: { sections: ['os'] } });
-    assert.match(result.steps[0]!.description, /sections/);
+
+    // The step line is derived from the tool name and the real arguments, not
+    // from the tool's description — that description is written for the model
+    // and reads as documentation when shown to a person.
+    assert.equal(result.steps[0]!.description, 'System: get info (sections: os)');
   });
 
   test('the ask-user control function becomes a clarification, not an action', async () => {
@@ -361,6 +365,84 @@ describe('LlmPlanner.recover', () => {
     await planner.recover(recoveryRequest());
 
     assert.equal(requests[0]!.model, config.llm.plannerModel);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+
+function summaryRequest(steps: unknown[]) {
+  return {
+    task: { ...planRequest('what cpu do I have').task, steps },
+    mode: 'controlled',
+    signal: new AbortController().signal,
+  } as never;
+}
+
+const succeededStep = {
+  id: 'step_1',
+  index: 0,
+  description: 'System: get info',
+  tool: 'system.getInfo',
+  input: {},
+  status: 'succeeded',
+  attempts: 1,
+  result: { success: true, data: { cpu: 'Intel i7-4800MQ' } },
+};
+
+describe('LlmPlanner.summarise', () => {
+  test('answers the original question from the tool results', async () => {
+    const { planner, requests } = makePlanner([{ text: 'You have an Intel i7-4800MQ.' }]);
+
+    const answer = await planner.summarise(summaryRequest([succeededStep]));
+
+    assert.equal(answer, 'You have an Intel i7-4800MQ.');
+    // The results have to reach the model, or it would be inventing the answer.
+    assert.match(JSON.stringify(requests[0]!.messages), /Intel i7-4800MQ/);
+  });
+
+  test('offers no tools, since reporting must not trigger more actions', async () => {
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.summarise(summaryRequest([succeededStep]));
+
+    assert.deepEqual(requests[0]!.tools, []);
+  });
+
+  test('uses the fast model, because this turn sits between the user and the answer', async () => {
+    const config = defaultConfig();
+    const { planner, requests } = makePlanner([{ text: 'ok' }], config);
+
+    await planner.summarise(summaryRequest([succeededStep]));
+
+    assert.equal(requests[0]!.model, config.llm.fastModel);
+  });
+
+  test('declines rather than guessing when there is nothing to report', async () => {
+    const { planner, requests } = makePlanner([{ text: 'unreachable' }]);
+
+    const answer = await planner.summarise(summaryRequest([]));
+
+    assert.equal(answer, undefined);
+    assert.equal(requests.length, 0);
+  });
+
+  test('a provider failure yields no summary rather than failing the task', async () => {
+    const { planner } = makePlanner([new LlmError('server', 'boom')]);
+
+    // The work already succeeded and verified. Failing to phrase it is not a
+    // reason to report a failure.
+    assert.equal(await planner.summarise(summaryRequest([succeededStep])), undefined);
+  });
+
+  test('propagates cancellation so a stop is not mistaken for a phrasing failure', async () => {
+    const { planner } = makePlanner([new LlmError('cancelled', 'stopped')]);
+
+    await assert.rejects(planner.summarise(summaryRequest([succeededStep])), (error: LlmError) => {
+      assert.equal(error.kind, 'cancelled');
+      return true;
+    });
   });
 });
 

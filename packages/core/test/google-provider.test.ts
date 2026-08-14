@@ -3,11 +3,11 @@ import test, { describe } from 'node:test';
 import {
   ASK_USER_FUNCTION,
   GoogleProvider,
-  LlmError,
   assertEncodable,
   decodeToolName,
   encodeToolName,
   toFunctionDeclarations,
+  type LlmError,
   type LlmRequest,
 } from '../dist/index.js';
 import { matchObject } from './helpers.ts';

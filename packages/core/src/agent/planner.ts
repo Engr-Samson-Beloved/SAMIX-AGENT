@@ -47,6 +47,17 @@ export interface PlannedStep {
   readonly input: unknown;
 }
 
+/**
+ * Input to the REPORT stage of the loop (spec §77): the finished task, with
+ * every step's result attached, so the answer can be written from what was
+ * actually observed rather than from what was intended.
+ */
+export interface SummaryRequest {
+  readonly task: Task;
+  readonly mode: AgentMode;
+  readonly signal: AbortSignal;
+}
+
 export interface Planner {
   /** Identifies the planner in logs and the status snapshot. */
   readonly name: string;
@@ -57,6 +68,18 @@ export interface Planner {
    * task, which is the safe default.
    */
   recover?(request: RecoveryRequest): Promise<PlanResult>;
+  /**
+   * Turn verified tool results into the sentence the user hears (spec §77's
+   * REPORT stage). Optional: without it the orchestrator falls back to its own
+   * mechanical summary, which states what ran but cannot answer a question.
+   *
+   * The orchestrator only calls this when **every step verified** — see
+   * `Agent.report()`. Honesty about unverified work stays a property of the
+   * code, not a request made of a language model.
+   *
+   * Returning `undefined` means "no better answer than the mechanical one".
+   */
+  summarise?(request: SummaryRequest): Promise<string | undefined>;
 }
 
 /** Materialise planner output into task steps. */

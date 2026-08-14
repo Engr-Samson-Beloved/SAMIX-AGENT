@@ -14,7 +14,14 @@ export { HybridPlanner } from './agent/hybrid-planner.js';
 export { LlmPlanner } from './agent/llm-planner.js';
 export type { LlmPlannerDeps } from './agent/llm-planner.js';
 export { RuleBasedPlanner, toTaskSteps } from './agent/planner.js';
-export type { PlanRequest, PlanResult, PlannedStep, Planner, RecoveryRequest } from './agent/planner.js';
+export type {
+  PlanRequest,
+  PlanResult,
+  PlannedStep,
+  Planner,
+  RecoveryRequest,
+  SummaryRequest,
+} from './agent/planner.js';
 
 export {
   ASK_USER_DECLARATION,

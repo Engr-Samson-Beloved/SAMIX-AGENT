@@ -32,8 +32,12 @@ afterEach(() => {
 });
 
 /** A planner that always returns the same plan. */
-function fixedPlanner(result: PlanResult): Planner {
-  return { name: 'fixed (test)', plan: () => Promise.resolve(result) };
+function fixedPlanner(result: PlanResult, summary?: () => Promise<string | undefined>): Planner {
+  return {
+    name: 'fixed (test)',
+    plan: () => Promise.resolve(result),
+    ...(summary ? { summarise: summary } : {}),
+  };
 }
 
 /** Build a runtime, optionally with a substitute planner and extra tools. */
@@ -161,6 +165,70 @@ describe('the verification guarantee (spec §29, development rule 25)', () => {
     const outcome = await done;
     assert.equal(outcome.type, 'task.failed');
     assert.equal((outcome as { error: { code: string } }).error.code, 'VERIFICATION_FAILED');
+  });
+
+  it('never lets a planner write the summary for unverified work', async () => {
+    const unverifiable: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.unverifiableToo',
+      description: 'A tool whose verification step fails when it is attempted.',
+      permission: 'write',
+      reversibility: 'reversible',
+      inputSchema: z.object({}),
+      verification: 'explicit',
+      execute: () => Promise.resolve(ok({ done: true })),
+      verify: () => Promise.reject(new Error('cannot reach the target to check')),
+    };
+
+    let asked = false;
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.unverifiableToo'), () => {
+        asked = true;
+        return Promise.resolve('All done, everything worked perfectly!');
+      }),
+      tools: [unverifiable as unknown as AgentTool<never, unknown>],
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('do it', 'text');
+
+    await done;
+
+    // The honesty guarantee is structural: an LLM is never given the chance to
+    // phrase unverified work, so it cannot be talked into "everything worked".
+    assert.equal(asked, false, 'the planner must not be asked to summarise unverified work');
+    assert.match(rt.tasks.find(taskId)?.summary ?? '', /could not confirm/i);
+  });
+
+  it('uses a planner-written summary when every step verified', async () => {
+    const rt = build({
+      planner: fixedPlanner(planFor('system.getInfo'), () =>
+        Promise.resolve('You are running Windows on an Intel CPU.'),
+      ),
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('what am I running', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed');
+    matchObject(outcome, { summary: 'You are running Windows on an Intel CPU.' });
+  });
+
+  it('falls back to the mechanical summary when the planner cannot phrase one', async () => {
+    const rt = build({
+      planner: fixedPlanner(planFor('system.getInfo'), () =>
+        Promise.reject(new Error('the provider is down')),
+      ),
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('what am I running', 'text');
+
+    const outcome = await done;
+    // Work that succeeded and verified must not be reported as failed just
+    // because the sentence describing it could not be written.
+    assert.equal(outcome.type, 'task.completed');
+    matchObject(outcome, { summary: /^Done\./ });
   });
 
   it('marks a step succeeded_unverified when the verifier cannot run', async () => {

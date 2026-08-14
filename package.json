@@ -13,6 +13,7 @@
   "scripts": {
     "check:prereqs": "node scripts/check-prereqs.mjs",
     "check:gemini": "node scripts/check-gemini.mjs",
+    "check:llm": "pnpm build:packages && node scripts/check-llm.mjs",
     "build": "pnpm -r --filter \"./packages/*\" build && pnpm --filter @samix/desktop build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",

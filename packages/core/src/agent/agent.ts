@@ -258,7 +258,7 @@ export class Agent {
       // ---- verify + report ----------------------------------------------
       this.machine.transition('verifying');
       this.deps.tasks.setStatus('verifying');
-      this.complete(this.summarise());
+      this.complete(await this.report());
     } catch (cause) {
       if (this.token.cancelled) {
         this.cancelTask(this.token.detail || 'Cancelled.');
@@ -523,7 +523,44 @@ export class Agent {
   }
 
   /**
-   * Build the sentence the user hears.
+   * REPORT stage of the loop (spec §77).
+   *
+   * A planner that can read tool results writes the answer, because "Done.
+   * System: get info" is not an answer to "what CPU do I have" — the data was
+   * fetched and then thrown away. `Planner.summarise` closes that gap.
+   *
+   * The guard in front of it is the important part. The planner is only invited
+   * to speak when **every step verified**; any failure or unverified step keeps
+   * the mechanical sentence, which is built from step status and cannot
+   * overstate what happened. Development rule 25 therefore holds structurally,
+   * rather than depending on a language model honouring an instruction not to
+   * claim success — which is exactly the kind of promise a model breaks under
+   * pressure from a user who wants to hear that it worked.
+   */
+  private async report(): Promise<string> {
+    const mechanical = this.summarise();
+    const { unverified, failed } = this.deps.tasks.outcome();
+
+    if (failed > 0 || unverified > 0) return mechanical;
+    if (!this.deps.planner.summarise) return mechanical;
+
+    try {
+      const written = await this.deps.planner.summarise({
+        task: this.requireTask(),
+        mode: this.mode,
+        signal: this.token.signal,
+      });
+      return written?.trim() || mechanical;
+    } catch (cause) {
+      // Failing to phrase the answer must not fail work that already succeeded.
+      if (this.token.cancelled) throw cause;
+      this.log.warn('could not write a summary; using the mechanical one', { error: String(cause) });
+      return mechanical;
+    }
+  }
+
+  /**
+   * Build the sentence the user hears when no planner can write one.
    *
    * Development rule 25 and spec §93 are the whole design of this method: it
    * reports what was verified, and says so explicitly when something completed

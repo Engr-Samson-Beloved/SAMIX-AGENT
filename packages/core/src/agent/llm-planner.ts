@@ -5,7 +5,14 @@ import type { ModelRouter } from '../ai/model-router.js';
 import { LlmError, type LlmMessage, type LlmProvider, type LlmResponse, type LlmToolCall } from '../ai/types.js';
 import type { Logger } from '../observability/logger.js';
 import type { ToolRegistry } from '../tools/registry.js';
-import type { PlanRequest, PlanResult, PlannedStep, Planner, RecoveryRequest } from './planner.js';
+import type {
+  PlanRequest,
+  PlanResult,
+  PlannedStep,
+  Planner,
+  RecoveryRequest,
+  SummaryRequest,
+} from './planner.js';
 
 /**
  * LLM-backed planner (spec §27, §28, §30).
@@ -136,6 +143,83 @@ export class LlmPlanner implements Planner {
     this.deps.logger.debug('recovering', { model: route.model, code: request.error.code });
 
     return this.converse({ request, messages, system, route, tools, config, phase: 'recover' });
+  }
+
+  // -------------------------------------------------------------------------
+  // Reporting (spec §77, REPORT)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Answer the user's original question from the results that were actually
+   * observed.
+   *
+   * Without this the agent fetches the data and throws it away: "what CPU do I
+   * have" completes with "Done. System: get info", which reports the mechanism
+   * instead of the answer.
+   *
+   * The orchestrator only calls this once every step has verified, so this
+   * method never has to reason about partial failure — and cannot be talked
+   * into claiming something worked when it did not.
+   */
+  async summarise(request: SummaryRequest): Promise<string | undefined> {
+    const steps = request.task.steps.filter((step) => step.status === 'succeeded');
+    if (steps.length === 0) return undefined;
+
+    const messages: LlmMessage[] = [{ role: 'user', text: request.task.instruction }];
+    for (const step of steps) {
+      messages.push({
+        role: 'model',
+        toolCalls: [{ id: step.id, name: step.tool, input: step.input }],
+      });
+      messages.push({
+        role: 'tool',
+        name: step.tool,
+        result: step.result?.data ?? { ok: true },
+      });
+    }
+    messages.push({
+      role: 'user',
+      text: 'Now answer my original question using those results. Do not describe the steps.',
+    });
+
+    // Routed to the fast model: this turn has no decisions in it, only phrasing
+    // of facts already gathered, and it sits between the user and the answer —
+    // so latency here is felt directly.
+    const route = this.deps.router.select({ kind: 'summarise' });
+
+    try {
+      const response = await this.deps.provider.generate({
+        model: route.model,
+        system: [
+          `You are SAMIX Agent reporting back to the person who asked. Answer their question directly`,
+          `from the tool results provided, in one or two short sentences of plain prose.`,
+          ``,
+          `  - State only what the results actually show. Never add, estimate or infer a fact that`,
+          `    is not in them, and never fill a gap with something plausible.`,
+          `  - If the results do not answer the question, say exactly that.`,
+          `  - Do not narrate the steps, name the tools, or mention that you used any.`,
+          `  - No preamble, no sign-off, no markdown.`,
+        ].join('\n'),
+        messages,
+        tools: [],
+        temperature: 0,
+        maxOutputTokens: route.maxOutputTokens,
+        signal: request.signal,
+      });
+
+      this.deps.logger.debug('wrote a summary', {
+        model: response.model,
+        durationMs: response.durationMs,
+      });
+      return response.text.trim() || undefined;
+    } catch (cause) {
+      if (cause instanceof LlmError && cause.kind === 'cancelled') throw cause;
+      // The work already succeeded and is already verified. Failing to phrase
+      // it is not a reason to report a failure, so the caller's mechanical
+      // summary stands.
+      this.deps.logger.warn('could not write a summary', { error: String(cause) });
+      return undefined;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -432,19 +516,42 @@ const AskUserArgs = z.object({
 });
 
 /**
- * Build the sentence shown next to a step in the UI.
+ * Build the short line shown next to a step in the UI and read back in the
+ * final summary.
  *
- * Gemini's `functionCall` carries no rationale, and asking the model for one per
- * step would mean either polluting every tool schema with a `_why` field or
- * paying for a second round trip. Deriving it from the tool's own description
- * plus its concrete arguments costs nothing and cannot drift from what will
- * actually run — the arguments shown are the arguments executed.
+ * Derived from the tool's **name** and its concrete arguments, deliberately not
+ * from `tool.description`. That description is written for the model (see
+ * `AgentTool.description`) and runs to several sentences of guidance about when
+ * to choose the tool; surfacing it to the user produces lines like
+ * "Done. Report facts about the computer the agent is running on: operating
+ * system and version, CPU and memory, Node runti…", which describes the tool
+ * rather than the work.
+ *
+ * Asking the model for a per-step rationale was the alternative and was
+ * rejected: it means either a `_why` field polluting every tool schema or a
+ * second round trip, and the answer could disagree with the call it labels.
+ * A name-derived line costs nothing and cannot drift — the arguments shown are
+ * the arguments that will execute.
  */
-function describeStep(name: string, description: string, input: unknown): string {
+function describeStep(name: string, _description: string, input: unknown): string {
+  const [namespace = name, method = ''] = name.split('.');
+  const action = humanise(method) || humanise(namespace);
+  const subject = capitalise(namespace);
   const summary = summariseArgs(input);
-  const firstSentence = description.split(/(?<=\.)\s/)[0]?.trim() ?? description;
-  const action = firstSentence.replace(/\.$/, '');
-  return summary ? `${action} (${summary})` : `${action} [${name}]`;
+
+  return summary ? `${subject}: ${action} (${summary})` : `${subject}: ${action}`;
+}
+
+/** `getInfo` → `get info`; `listDirectory` → `list directory`. */
+function humanise(identifier: string): string {
+  return identifier
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .trim();
+}
+
+function capitalise(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
 function summariseArgs(input: unknown): string {
@@ -458,7 +565,16 @@ function summariseArgs(input: unknown): string {
 
 function formatValue(value: unknown): string {
   if (typeof value === 'string') return value.length > 60 ? `${value.slice(0, 57)}…` : value;
-  if (Array.isArray(value)) return `[${value.length}]`;
-  if (typeof value === 'object') return '{…}';
+  if (Array.isArray(value)) {
+    // Show the values when there are few and they are short — "sections: os,
+    // hardware" tells the user what will happen, where "sections: [2]" does not.
+    const scalars = value.filter((item) => typeof item === 'string' || typeof item === 'number');
+    if (scalars.length === value.length && value.length <= 4) {
+      const joined = scalars.join(', ');
+      if (joined.length <= 60) return joined;
+    }
+    return `${value.length} items`;
+  }
+  if (typeof value === 'object' && value !== null) return '…';
   return String(value);
 }

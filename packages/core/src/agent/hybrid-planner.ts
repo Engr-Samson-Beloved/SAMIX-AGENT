@@ -1,5 +1,11 @@
 import type { Logger } from '../observability/logger.js';
-import type { PlanRequest, PlanResult, Planner, RecoveryRequest } from './planner.js';
+import type {
+  PlanRequest,
+  PlanResult,
+  Planner,
+  RecoveryRequest,
+  SummaryRequest,
+} from './planner.js';
 
 /**
  * Chooses between the LLM planner and the deterministic one, per turn.
@@ -52,6 +58,14 @@ export class HybridPlanner implements Planner {
       return { kind: 'give-up', reason: 'No recovery strategy is available.' };
     }
     return planner.recover(request);
+  }
+
+  async summarise(request: SummaryRequest): Promise<string | undefined> {
+    const planner = await this.active();
+    // `undefined` means "nothing better than the mechanical summary", which is
+    // exactly right for the deterministic planner — it has no way to read tool
+    // results back into prose.
+    return planner.summarise?.(request);
   }
 
   private async active(): Promise<Planner> {

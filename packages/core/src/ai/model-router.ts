@@ -38,6 +38,8 @@ export type TurnKind =
   | 'recover'
   /** Interpreting a screenshot (Phase 11). */
   | 'vision'
+  /** Writing the final answer from results already gathered (spec §77, REPORT). */
+  | 'summarise'
   /** Cheap yes/no or labelling turn with no consequences. */
   | 'classify';
 
@@ -96,6 +98,20 @@ export class ModelRouter {
           reason: 'vision turn',
           temperature: 0,
           maxOutputTokens: llm.maxOutputTokens,
+        };
+
+      case 'summarise':
+        return {
+          model: llm.fastModel,
+          // No decisions are made in this turn — the facts are already gathered
+          // and verified, and all that remains is phrasing them. It also sits
+          // directly between the user and their answer, so its latency is the
+          // part they feel.
+          reason: 'phrasing gathered results; fast model',
+          temperature: 0,
+          // Enough for a couple of sentences. A cap here also stops a model
+          // that starts narrating from turning a one-line answer into an essay.
+          maxOutputTokens: 512,
         };
 
       case 'classify':
