@@ -12,6 +12,7 @@
   "packageManager": "pnpm@10.33.2",
   "scripts": {
     "check:prereqs": "node scripts/check-prereqs.mjs",
+    "check:gemini": "node scripts/check-gemini.mjs",
     "build": "pnpm -r --filter \"./packages/*\" build && pnpm --filter @samix/desktop build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",

@@ -60,9 +60,23 @@ These are known gaps in shipped work, not future features.
       and strips unsupported keywords, and unit-test it against every registered
       tool so a future tool schema cannot silently break tool calling.
       *This is the one Phase 1 assumption the Gemini decision invalidates.*
-- [ ] Confirm the exact model IDs in `llm.plannerModel` / `fastModel` /
-      `visionModel` against the current Gemini model list before shipping —
-      the defaults are a starting point, not a verified pin.
+- [x] ~~Confirm the exact model IDs against the live API.~~ Done 2026-08-13 via
+      `pnpm check:gemini`. Defaults are now `gemini-3.6-flash` (planner/vision)
+      and `gemini-3.5-flash-lite` (fast), each verified to complete a function
+      call with a SAMIX-shaped tool schema.
+- [ ] **The current key has no Pro access** — every `*-pro-*` model returns
+      `RESOURCE_EXHAUSTED` (quota/billing), so the planner is Flash-class.
+      Flash handles the tool-calling probe fine, but Pro would plan
+      multi-step tasks better. Revisit once billing is enabled, and re-run
+      `pnpm check:gemini` to confirm entitlement before changing the pin.
+- [ ] **Latency budget needs model routing to be real, not aspirational.**
+      Measured: Flash ≈ 2.6–2.9s, Flash-Lite ≈ 0.7s. Spec §91 wants simple
+      command planning under 2s, so `fastModel` must actually be used for
+      simple//classification turns rather than defaulting everything to
+      `plannerModel`. Build the router in `model-router.ts`, not ad hoc.
+- [ ] Re-run `pnpm check:gemini` in CI, or at least before each release —
+      Google retires models without warning. The 2.5 family was already
+      "no longer available to new users" the day these defaults were written.
 - [ ] Streaming responses so the UI updates during long turns (spec §47).
       Note Gemini streams a different envelope from Anthropic; keep the
       difference inside `google.ts`, never in the orchestrator.

@@ -42,13 +42,30 @@ export const LlmConfigSchema = z.object({
   /**
    * Model IDs are configuration, never constants baked into code — the spec
    * (§44) writes "configured-model" precisely to avoid pinning a model in
-   * source. Phase 3 wires these to the provider abstraction.
+   * source. These are only the starting values.
+   *
+   * Verified against the live API on 2026-08-13 with `pnpm check:gemini`: each
+   * one authenticated and completed a function call using a schema shaped like
+   * a real SAMIX tool. The previous defaults were chosen from memory and were
+   * already dead — the API answered "no longer available to new users" — which
+   * is why the check script exists and why these are pinned rather than
+   * guessed.
+   *
+   * Pinned deliberately, not aliased to `gemini-flash-latest`. An agent that
+   * controls a computer should behave the same tomorrow as today; a silently
+   * moving planner is a debugging nightmare. Run `pnpm check:gemini` to detect
+   * when a pin is deprecated.
    */
-  plannerModel: z.string().default('gemini-2.5-pro'),
-  /** Cheap model for classification/routing (spec §63). */
-  fastModel: z.string().default('gemini-2.5-flash'),
+  plannerModel: z.string().default('gemini-3.6-flash'),
+  /**
+   * Cheap, fast model for classification and routing (spec §63). Measured at
+   * ~700ms on the tool-calling probe, comfortably inside the spec §91 target
+   * of under two seconds for simple command planning — which the heavier
+   * planner model does NOT meet, hence the split.
+   */
+  fastModel: z.string().default('gemini-3.5-flash-lite'),
   /** Vision-capable model (spec §63, Phase 11). */
-  visionModel: z.string().default('gemini-2.5-pro'),
+  visionModel: z.string().default('gemini-3.6-flash'),
   maxOutputTokens: z.number().int().positive().max(64_000).default(4096),
   /** Cost guard: refuse a task projected to exceed this many input tokens. */
   maxContextTokens: z.number().int().positive().default(120_000),
