@@ -18,7 +18,10 @@ These are known gaps in shipped work, not future features.
       `EphemeralSecretStore` is explicitly non-persistent. Implement the real
       backing store in the Rust host (the `keyring` crate) behind two new IPC
       methods, and mark the `secrets` subsystem `ready`.
-      *Blocks:* Phase 3, which needs somewhere safe for the API key.
+      *Now the top blocker:* Phase 3 works, but only because
+      `DevEnvSecretStore` reads `GEMINI_API_KEY` from the environment, which it
+      refuses to do under `NODE_ENV=production`. Until this lands there is no
+      way for a packaged build to hold a key at all.
 - [ ] **esbuild does not run on the primary development machine**, so
       `vite build` and `vite dev` hang. Diagnosis and remediation in
       `docs/PHASE-1-REPORT.md`. Not a code defect.
@@ -47,33 +50,44 @@ These are known gaps in shipped work, not future features.
 
 ## Phase 3 — LLM (engine: Google Gemini)
 
-- [ ] `src/ai/` provider abstraction: `provider.ts`, `google.ts`, `anthropic.ts`,
-      `openai.ts`, `local.ts`, `model-router.ts` (spec §6).
-- [ ] `GeminiPlanner implements Planner` — drops into the existing seam.
-- [ ] **Make `registry.toLlmSchemas()` provider-aware.** It currently emits
-      Anthropic's shape (`{ name, description, input_schema }`). Gemini wants
-      `functionDeclarations` with a `parameters` object, and accepts only a
-      restricted OpenAPI-style subset of JSON Schema — it rejects constructs
-      that `z.toJSONSchema()` emits freely, notably `$ref`/`$defs`,
-      `additionalProperties`, and some `anyOf` positions.
-      *Do:* add a per-provider projection plus a sanitiser that inlines `$ref`s
-      and strips unsupported keywords, and unit-test it against every registered
-      tool so a future tool schema cannot silently break tool calling.
-      *This is the one Phase 1 assumption the Gemini decision invalidates.*
+**Status: the core path is done and verified against the live API.**
+`pnpm check:llm` drives real instructions through the whole loop; the remaining
+unticked items are refinements, not blockers.
+
+- [x] ~~`src/ai/` provider abstraction (spec §6).~~ `types.ts` (provider-neutral
+      contract and `LlmError` taxonomy), `json-schema.ts`, `google.ts`,
+      `model-router.ts`, `index.ts` with `createProvider()`. Unimplemented
+      providers throw rather than silently falling back to Google.
+- [x] ~~`GeminiPlanner implements Planner`.~~ Shipped as `LlmPlanner`
+      (provider-neutral, per spec §6 — nothing outside `src/ai/` names a
+      provider) plus `HybridPlanner`, which re-checks credentials each turn and
+      falls back to the rule-based planner when no key is configured.
+- [x] ~~Make `registry.toLlmSchemas()` provider-aware.~~ The registry now emits
+      neutral JSON Schema and `ai/json-schema.ts` projects it into Gemini's
+      dialect. The sanitiser is **allow-list based**: it copies keywords it
+      understands rather than stripping ones it knows are bad, so a future Zod
+      construct degrades to a warning instead of poisoning the request. 18 unit
+      tests plus a startup assertion over every registered tool.
 - [x] ~~Confirm the exact model IDs against the live API.~~ Done 2026-08-13 via
       `pnpm check:gemini`. Defaults are now `gemini-3.6-flash` (planner/vision)
       and `gemini-3.5-flash-lite` (fast), each verified to complete a function
       call with a SAMIX-shaped tool schema.
+- [x] ~~Model routing: cheap model for classification, strong for planning
+      (§63).~~ `ModelRouter` + `classifyInstruction()`. Biased towards the
+      strong model: it steps down only on positively-recognised simple
+      instructions, because mis-planning costs more than 2s of latency.
+- [x] ~~Implement `Planner.recover()` for real error recovery (spec §30).~~
+      A prose-only answer during recovery becomes a give-up, never a `reply` —
+      a `reply` would drive `Agent.complete()` and mark a failed task done.
+- [x] ~~REPORT stage.~~ `Planner.summarise()` turns tool results into an answer.
+      Honesty is structural, not prompted: `Agent.report()` only invites the
+      planner to write a summary when nothing failed and nothing is unverified,
+      so no model can talk the agent into "everything worked perfectly".
 - [ ] **The current key has no Pro access** — every `*-pro-*` model returns
       `RESOURCE_EXHAUSTED` (quota/billing), so the planner is Flash-class.
       Flash handles the tool-calling probe fine, but Pro would plan
       multi-step tasks better. Revisit once billing is enabled, and re-run
       `pnpm check:gemini` to confirm entitlement before changing the pin.
-- [ ] **Latency budget needs model routing to be real, not aspirational.**
-      Measured: Flash ≈ 2.6–2.9s, Flash-Lite ≈ 0.7s. Spec §91 wants simple
-      command planning under 2s, so `fastModel` must actually be used for
-      simple//classification turns rather than defaulting everything to
-      `plannerModel`. Build the router in `model-router.ts`, not ad hoc.
 - [ ] Re-run `pnpm check:gemini` in CI, or at least before each release —
       Google retires models without warning. The 2.5 family was already
       "no longer available to new users" the day these defaults were written.
@@ -82,13 +96,20 @@ These are known gaps in shipped work, not future features.
       difference inside `google.ts`, never in the orchestrator.
 - [ ] Decide how Gemini's thinking/reasoning budget maps onto
       `llm.maxOutputTokens`, and whether it needs its own config field.
-- [ ] Implement `Planner.recover()` for real error recovery (spec §30).
-- [ ] Context window management and summarisation (spec §62).
-- [ ] Model routing: cheap model for classification, strong for planning (§63).
+- [ ] Context window management and summarisation (spec §62). Today the planner
+      refuses a request over the character-estimated budget rather than
+      compacting history; that is honest but not yet useful for long tasks.
+- [ ] Multi-turn conversation memory: each instruction is planned in isolation,
+      so "and now do the same for the other one" cannot work.
 - [ ] Read the API key from the secret store, never from config or `.env` in a
-      packaged build.
+      packaged build. `DevEnvSecretStore` seeds from `GEMINI_API_KEY` and
+      refuses to activate when `NODE_ENV=production`, so this is currently
+      *safe* but *development-only* — the Credential Manager item above is what
+      unblocks a shippable build.
 
-*Success:* "What is the current date?" is answered.
+*Success:* achieved — `pnpm check:llm` answers "What operating system and CPU is
+this computer running?" from a real tool result, and refuses to invent a delete
+tool for "Delete the thing I mentioned earlier."
 
 ## Phase 4 — Filesystem
 

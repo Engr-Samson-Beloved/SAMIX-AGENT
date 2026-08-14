@@ -4,6 +4,79 @@ All notable changes to SAMIX Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Phase 3: the LLM engine. The agent now plans with Google Gemini and answers in
+its own words; the deterministic Phase 1 planner remains as the no-key fallback.
+
+### Added
+
+**AI layer (`packages/core/src/ai/`)**
+
+- Provider-neutral LLM contract — `ToolSchema`, `LlmMessage`, `LlmRequest`,
+  `LlmResponse`, `LlmProvider` — so nothing outside `src/ai/` names a provider
+  (spec §6).
+- `LlmError` taxonomy of 12 kinds with an explicit retryable set and a
+  `userMessage()` for the console. A 429 is disambiguated into `rate_limit`
+  (retry helps) versus `quota` (retrying can never help).
+- `GoogleProvider`: Gemini v1beta over `fetch`, no SDK. Bounded retries with
+  backoff, cancellation checked before every attempt and never retried, the key
+  resolved per request (so a rotated key takes effect immediately) and sent only
+  in the `x-goog-api-key` header — asserted by test to appear in no body or URL.
+- JSON Schema → Gemini projection. Gemini rejects an entire request when any one
+  declaration carries an unknown keyword, so one bad tool schema would kill tool
+  calling for every tool. The converter is allow-list based, inlines `$ref`s
+  with a cycle guard, collapses nullable unions, folds unsupported formats into
+  the description, and reports degradations as warnings rather than failing.
+- Tool-name codec (`system.getInfo` ⇄ `system_getInfo`) with a reserved control
+  function `samix__ask_user`, which is how the model asks a question instead of
+  guessing (spec §94).
+- `ModelRouter` + `classifyInstruction()`: the fast model for classification and
+  reporting, the planner model for everything else. Deliberately biased towards
+  the strong model — it steps down only on recognised-simple instructions.
+
+**Agent**
+
+- `LlmPlanner`: the model proposes, the planner disposes. Every proposed call is
+  re-validated against the registry (existence, mode availability, real Zod
+  input schema); one repair round-trip is offered, then the agent gives up
+  honestly. A truncated response is never executed.
+- `HybridPlanner`: chooses per turn between the LLM and the rule-based planner
+  by asking the secret store for credentials, so a key pasted into Settings
+  takes effect on the next instruction and a throwing store degrades instead of
+  taking the agent down.
+- **REPORT stage** in the agent loop. `Planner.summarise()` turns tool results
+  into an actual answer instead of "Done." — but `Agent.report()` only invites
+  it when nothing failed and nothing is unverified, so honesty is enforced
+  structurally rather than by prompt.
+- `registry.toLlmSchemas()` now emits provider-neutral JSON Schema; the dialect
+  is the provider's problem.
+
+**Project**
+
+- `pnpm check:llm` — end-to-end check against the live API through a real
+  runtime in a temp directory. Unit tests prove the code does what we think;
+  this proves what we think matches what Google accepts.
+- 183 tests (up from 103).
+
+### Fixed
+
+- Step descriptions shown to the user were the LLM-facing tool documentation
+  ("Report facts about the computer the agent is running on: operating
+  system…"). They are now derived from the tool name and arguments.
+- `apps/desktop`'s `typecheck` script emitted `.js` files beside their `.tsx`
+  sources before failing on TS5096. A stale emitted `.js` silently shadows the
+  source at build time, so the script is fixed and the artifacts are gitignored.
+
+### Known limitations
+
+- Each instruction is planned in isolation; there is no conversation memory yet.
+- Over-budget requests are refused rather than compacted (spec §62 pending).
+- The API key still comes from `.env` via `DevEnvSecretStore`, which refuses to
+  activate under `NODE_ENV=production`. Windows Credential Manager is the
+  blocker for a packaged build.
+- No streaming, so the console shows nothing during a turn.
+
 ## [0.1.0] — 2026-08-13
 
 Phase 1: Foundation. The agent runtime, safety model and desktop shell.

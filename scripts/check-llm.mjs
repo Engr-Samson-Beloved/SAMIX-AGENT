@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRuntime } from '../packages/core/dist/index.js';
+import { loadEnv } from './lib/env.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -33,25 +34,7 @@ const C = {
   cyan: '[36m',
 };
 
-/** Minimal .env reader — one file, simple KEY=VALUE lines, no dependency. */
-function loadEnv() {
-  const file = path.join(root, '.env');
-  if (!fs.existsSync(file)) return;
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
-    const index = trimmed.indexOf('=');
-    if (index === -1) continue;
-    const key = trimmed.slice(0, index).trim();
-    const value = trimmed
-      .slice(index + 1)
-      .trim()
-      .replace(/^["']|["']$/g, '');
-    if (!process.env[key]) process.env[key] = value;
-  }
-}
-
-loadEnv();
+loadEnv(root);
 
 if (!process.env['GEMINI_API_KEY']) {
   console.error(`${C.red}No GEMINI_API_KEY found.${C.reset} Add it to .env or the environment.`);

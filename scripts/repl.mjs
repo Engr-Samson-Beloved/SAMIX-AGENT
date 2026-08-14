@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { loadEnv } from './lib/env.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const entry = path.join(root, 'packages', 'core', 'dist', 'main.js');
@@ -35,6 +36,12 @@ if (!fs.existsSync(entry)) {
   console.error(`${C.red}Core not built.${C.reset} Run "pnpm build:packages" first.`);
   process.exit(1);
 }
+
+// The child inherits this process's environment, which is how the development
+// key reaches DevEnvSecretStore. Without it the core still starts, but the LLM
+// subsystem reports "unavailable" and the agent silently falls back to the
+// rule-based planner — a confusing way to discover a missing key.
+loadEnv(root);
 
 // Real config and real logs — this is a manual driver, not a test. Pass
 // --data-dir to point it somewhere disposable instead.

@@ -4,11 +4,12 @@ A local-first autonomous computer agent for Windows. You speak or type an
 instruction; the agent plans it, executes real operations through explicit
 tools, **verifies that they actually happened**, and reports what it did.
 
-> **Status: Phase 1 (Foundation) complete.** The runtime, permission system,
-> verification pipeline, observability and desktop shell are built and tested.
-> Voice arrives in Phase 2 and the LLM planner in Phase 3 — until then the agent
-> understands a small set of deterministic instructions and says so plainly
-> rather than guessing. See [`docs/PHASE-1-REPORT.md`](docs/PHASE-1-REPORT.md).
+> **Status: Phases 1 and 3 complete.** The runtime, permission system,
+> verification pipeline, observability and desktop shell are built and tested
+> (Phase 1), and the agent now plans with Google Gemini and answers in its own
+> words (Phase 3). Voice is Phase 2 and filesystem tools are Phase 4, so the
+> agent can currently *reason* about far more than it can *do*. See
+> [`docs/PHASE-1-REPORT.md`](docs/PHASE-1-REPORT.md).
 
 ---
 
