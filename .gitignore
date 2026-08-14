@@ -5,6 +5,18 @@ out/
 *.tsbuildinfo
 .turbo/
 
+# TypeScript output emitted next to its own source.
+#
+# The frontend is a noEmit project — Vite compiles it — so any .js beside a .tsx
+# is a stray from a misconfigured tsc run, never something to commit. It is
+# worth ignoring rather than just deleting: `import './App'` resolves a stale
+# .js in preference to the .tsx, so a leftover artifact silently shadows the
+# real source and the app runs code nobody edited.
+apps/desktop/src/**/*.js
+apps/desktop/src/**/*.js.map
+apps/desktop/vite.config.js
+apps/desktop/vite.config.js.map
+
 # Rust / Tauri
 target/
 apps/desktop/src-tauri/target/
