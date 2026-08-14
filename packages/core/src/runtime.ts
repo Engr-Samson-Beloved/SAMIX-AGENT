@@ -5,8 +5,11 @@ import {
 } from '@samix/shared';
 import { Agent } from './agent/agent.js';
 import { StepExecutor } from './agent/executor.js';
+import { HybridPlanner } from './agent/hybrid-planner.js';
+import { LlmPlanner } from './agent/llm-planner.js';
 import { RuleBasedPlanner, type Planner } from './agent/planner.js';
 import { TaskManager } from './agent/task-manager.js';
+import { createProvider, ModelRouter, toFunctionDeclarations } from './ai/index.js';
 import { ConfigStore } from './config/config-store.js';
 import { createAppPaths, type AppPaths } from './config/paths.js';
 import { EventBus } from './events/event-bus.js';
@@ -129,7 +132,45 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
 
   // --- agent ---------------------------------------------------------------
   const tasks = new TaskManager();
-  const planner = options.planner ? options.planner(registry) : new RuleBasedPlanner(registry);
+
+  // --- planning ------------------------------------------------------------
+  // Every registered tool's schema is projected into the provider's dialect
+  // once, here, at startup. A tool whose schema Gemini would reject poisons the
+  // entire `tools` array — every request fails, not just the one using it — so
+  // this is checked when the process starts rather than the first time a user
+  // asks for something.
+  const fallbackPlanner = new RuleBasedPlanner(registry);
+  const router = new ModelRouter(() => config.get().llm);
+  const provider = createProvider(initial.llm.provider, {
+    // Resolved per request, so a key pasted into Settings takes effect on the
+    // next turn rather than the next restart.
+    apiKey: () => secrets.get('google.apiKey'),
+  });
+  const llmPlanner = new LlmPlanner({
+    provider,
+    router,
+    registry,
+    config: () => config.get(),
+    logger: rootLog,
+  });
+  const planner = options.planner
+    ? options.planner(registry)
+    : new HybridPlanner({
+        llm: llmPlanner,
+        fallback: fallbackPlanner,
+        hasCredentials: async () => (await secrets.get('google.apiKey')) !== undefined,
+        logger: rootLog,
+      });
+
+  try {
+    const { warnings } = toFunctionDeclarations(registry.toLlmSchemas('developer'));
+    for (const warning of warnings) log.warn('tool schema degraded for the LLM', { detail: warning });
+  } catch (cause) {
+    // A tool name that cannot be encoded is a programming error, and one that
+    // would break tool calling for every tool. Fail loudly at boot.
+    log.error('a registered tool cannot be described to the LLM', { error: String(cause) });
+    throw cause;
+  }
 
   // The executor needs the agent's confirmation gate, and the agent needs the
   // executor. Same late-binding technique: the gate is only ever called during
@@ -180,11 +221,31 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
   agent.setSubsystem({
     name: 'secrets',
     status: secrets.isPersistent() ? 'ready' : 'unavailable',
-    detail: secrets.isPersistent() ? 'OS credential store' : 'in-memory only (Phase 3 wires the OS store)',
+    detail: secrets.isPersistent()
+      ? 'OS credential store'
+      : 'in-memory, seeded from the environment — the OS credential store is still pending',
   });
   agent.setSubsystem({ name: 'voice', status: 'not-implemented', detail: 'Phase 2' });
-  agent.setSubsystem({ name: 'llm', status: 'not-implemented', detail: 'Phase 3' });
   agent.setSubsystem({ name: 'filesystem', status: 'not-implemented', detail: 'Phase 4' });
+
+  // Whether an API key exists is an async question, and blocking startup on the
+  // secret store would make the window slow to appear for a fact the UI can
+  // absorb a moment later. Report the honest interim state, then correct it.
+  agent.setSubsystem({ name: 'llm', status: 'unavailable', detail: 'checking credentials…' });
+  void secrets
+    .get('google.apiKey')
+    .then((key) => {
+      agent.setSubsystem({
+        name: 'llm',
+        status: key ? 'ready' : 'unavailable',
+        detail: key
+          ? `${initial.llm.provider}: ${initial.llm.plannerModel} / ${initial.llm.fastModel}`
+          : 'no API key configured — planning falls back to deterministic rules',
+      });
+    })
+    .catch((cause: unknown) => {
+      agent.setSubsystem({ name: 'llm', status: 'error', detail: String(cause) });
+    });
 
   let shuttingDown = false;
   const shutdown = (): void => {

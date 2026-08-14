@@ -120,7 +120,17 @@ describe('mode filtering', () => {
       schemas.map((s) => s.name),
       ['demo.always'],
     );
-    matchObject(schemas[0]?.input_schema, { type: 'object' });
+    matchObject(schemas[0]?.parameters, { type: 'object' });
+  });
+
+  it('emits provider-neutral JSON Schema, leaving the dialect to the provider', () => {
+    const [schema] = registry.toLlmSchemas('controlled');
+    // The registry is the single source of the schemas; translating them into
+    // any one API's subset happens in that provider's module, so nothing here
+    // may be shaped like a particular vendor's payload.
+    assert.ok(schema && !('input_schema' in schema), 'no Anthropic-specific key');
+    assert.ok(schema && !('functionDeclarations' in schema), 'no Gemini-specific key');
+    assert.deepStrictEqual(Object.keys(schema!).sort(), ['description', 'name', 'parameters']);
   });
 });
 

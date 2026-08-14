@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AgentMode, AgentTool, ToolDescriptor } from '@samix/shared';
+import type { ToolSchema } from '../ai/types.js';
 
 /**
  * Tool registry (spec §11).
@@ -129,40 +130,41 @@ export class ToolRegistry {
   }
 
   /**
-   * Project tools into the JSON-Schema shape LLM tool-calling APIs expect
-   * (spec §7). Filtered by mode so the model is never told about a capability
-   * the current mode forbids.
+   * Project tools into provider-neutral schemas for the LLM layer (spec §7),
+   * filtered by mode so the model is never told about a capability the current
+   * mode forbids.
    *
-   * Phase 3 consumes this. It lives here rather than in the AI layer because the
-   * registry owns the schemas, and duplicating the projection per provider is how
-   * providers drift out of sync.
+   * ## Neutral on purpose
    *
-   * ## Provider caveat — read before wiring Gemini
+   * This emits plain JSON Schema and stops there. It does **not** produce any
+   * provider's wire format, because each provider accepts a different subset:
+   * Gemini rejects `$ref`/`$defs`, `additionalProperties`, `const` and `allOf`,
+   * all of which `z.toJSONSchema()` emits freely, while Anthropic accepts them.
    *
-   * The `{ name, description, input_schema }` shape below is Anthropic's.
-   * Gemini expects `functionDeclarations` with a `parameters` object, and
-   * accepts only a restricted OpenAPI-style subset of JSON Schema — it rejects
-   * `$ref`/`$defs`, `additionalProperties` and some `anyOf` positions that
-   * `z.toJSONSchema()` emits happily.
+   * The lossy translation therefore belongs in the provider module, where it can
+   * be tested against that provider's rules (`ai/json-schema.ts` for Gemini).
+   * Doing it here would mean either picking a favourite provider — which is how
+   * the Phase 1 version ended up hard-coding Anthropic's shape — or teaching the
+   * registry about every API we might ever call.
    *
-   * Phase 3 must therefore make this method provider-aware and add a sanitiser,
-   * rather than assuming this output is portable. Keep the projection here (one
-   * place, testable against every registered tool) and the wire format inside
-   * the provider module.
+   * The registry's job is to be the single source of the schemas. Serialising
+   * them is somebody else's.
    */
-  toLlmSchemas(mode: AgentMode): Array<{
-    name: string;
-    description: string;
-    input_schema: Record<string, unknown>;
-  }> {
+  toLlmSchemas(mode: AgentMode): ToolSchema[] {
     return this.availableIn(mode).map((tool) => ({
       name: tool.name,
       description: tool.description,
-      input_schema: z.toJSONSchema(tool.inputSchema as z.ZodType, {
+      parameters: z.toJSONSchema(tool.inputSchema as z.ZodType, {
         // Tool schemas are sent to a model, not used for local validation, so
-        // unrepresentable constructs should degrade rather than throw.
+        // unrepresentable constructs should degrade rather than throw. The
+        // input is re-validated against the real Zod schema before execution.
         unrepresentable: 'any',
         io: 'input',
+        // Inline rather than emit `$defs`. Every provider subset we care about
+        // either rejects `$ref` outright or handles it inconsistently, and
+        // resolving it here means the sanitisers have less to undo.
+        cycles: 'ref',
+        reused: 'inline',
       }) as Record<string, unknown>,
     }));
   }

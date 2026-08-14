@@ -10,8 +10,45 @@ export { CancellationToken, delay, withTimeout } from './agent/cancellation.js';
 export type { CancelReason } from './agent/cancellation.js';
 export { StepExecutor } from './agent/executor.js';
 export type { ConfirmationGate, ExecuteStepContext, ExecutorDeps, StepOutcome } from './agent/executor.js';
+export { HybridPlanner } from './agent/hybrid-planner.js';
+export { LlmPlanner } from './agent/llm-planner.js';
+export type { LlmPlannerDeps } from './agent/llm-planner.js';
 export { RuleBasedPlanner, toTaskSteps } from './agent/planner.js';
 export type { PlanRequest, PlanResult, PlannedStep, Planner, RecoveryRequest } from './agent/planner.js';
+
+export {
+  ASK_USER_DECLARATION,
+  ASK_USER_FUNCTION,
+  GoogleProvider,
+  LlmError,
+  ModelRouter,
+  assertEncodable,
+  classifyInstruction,
+  createProvider,
+  decodeToolName,
+  encodeToolName,
+  toFunctionDeclarations,
+  toGeminiSchema,
+} from './ai/index.js';
+export type {
+  AttemptInfo,
+  FinishReason,
+  GeminiSchema,
+  GoogleProviderOptions,
+  InstructionVerdict,
+  LlmErrorKind,
+  LlmMessage,
+  LlmProvider,
+  LlmRequest,
+  LlmResponse,
+  LlmToolCall,
+  LlmUsage,
+  Route,
+  RouteRequest,
+  SchemaConversionResult,
+  ToolSchema,
+  TurnKind,
+} from './ai/index.js';
 export {
   AgentStateMachine,
   IllegalTransitionError,
