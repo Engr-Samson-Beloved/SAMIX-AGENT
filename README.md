@@ -68,7 +68,29 @@ pnpm check:prereqs
 ```powershell
 pnpm install
 pnpm build:packages     # compile shared + core
-pnpm test               # 103 tests
+pnpm test               # 183 tests
+```
+
+### Configure the LLM
+
+Put a [Google AI Studio](https://aistudio.google.com/apikey) key in a `.env`
+file at the repository root:
+
+```
+GEMINI_API_KEY=AIza...
+```
+
+`.env` is gitignored, and `DevEnvSecretStore` — the only thing that reads it —
+refuses to activate when `NODE_ENV=production`, so a packaged build cannot pick
+up a stray environment variable. Persistent storage in the Windows Credential
+Manager is tracked in `TODO.md`.
+
+Without a key the agent still runs: it falls back to the deterministic Phase 1
+planner, and the `llm` subsystem reports `unavailable` in `/status`.
+
+```powershell
+pnpm check:gemini       # does the key work, and which models can it call?
+pnpm check:llm          # drive real instructions through the whole loop
 ```
 
 ### Run the agent without the desktop shell
@@ -112,16 +134,20 @@ pnpm tauri build        # produces an NSIS installer
 
 ## Try it
 
-The Phase 1 planner is deterministic — no LLM, no network, no cost. It handles:
+```powershell
+pnpm repl
+```
 
 | Say | What happens |
 | --- | --- |
-| `what system am I on?` | `system.getInfo` → verified → reports OS, CPU, memory, user |
-| `what is your status?` | `agent.getStatus` → mode, available tools, subsystem readiness |
-| `how much memory do I have?` | `system.getInfo` scoped to hardware |
-| anything else | says honestly that it does not understand yet, and lists what it can do |
+| `What OS and CPU is this computer running?` | `system.getInfo` → verified → *"This computer is running Windows 11 Home on an Intel Core i7-4800MQ."* |
+| `What is your current mode and which tools do you have?` | `agent.getStatus` → answered from the real result |
+| `Delete the thing I mentioned earlier.` | asks which thing — it does **not** invent a delete tool |
 
-That last row is the point. The agent never invents a plan it cannot execute.
+That last row is the point. Only two tools exist so far, and the model is not
+permitted to pretend otherwise: every call it proposes is re-validated against
+the registry, the current mode and the tool's real input schema before anything
+runs. ([ADR-0005](docs/ADR-0005-llm-layer.md))
 
 ---
 
@@ -174,7 +200,8 @@ execute with timeout → VERIFY → audit → report
 pnpm typecheck     # strict TypeScript across all packages
 pnpm lint
 pnpm test          # builds packages, then runs the suite
-pnpm verify        # all three
+pnpm smoke         # drives the compiled core over real stdio
+pnpm verify        # all four
 ```
 
 Tests use Node's built-in runner (`node --test`) against the compiled output in
