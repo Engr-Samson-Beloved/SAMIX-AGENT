@@ -115,6 +115,7 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
   // object — the indirection is the point, so it should be visible.
   const agentRef: { current: Agent | undefined } = { current: undefined };
   const registry = createToolRegistry({
+    pathPolicy,
     statusProvider: () => {
       const current = config.get();
       const mode = current.automation.mode;
@@ -226,7 +227,27 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
       : 'in-memory, seeded from the environment — the OS credential store is still pending',
   });
   agent.setSubsystem({ name: 'voice', status: 'not-implemented', detail: 'Phase 2' });
-  agent.setSubsystem({ name: 'filesystem', status: 'not-implemented', detail: 'Phase 4' });
+  agent.setSubsystem({
+    name: 'filesystem',
+    status: 'ready',
+    detail: `${initial.security.trustedFolders.length} trusted folders; writes are refused elsewhere`,
+  });
+  agent.setSubsystem({
+    name: 'applications',
+    status: process.platform === 'win32' ? 'ready' : 'unavailable',
+    detail:
+      process.platform === 'win32'
+        ? 'launch, close and list installed applications'
+        : 'process control is implemented for Windows only',
+  });
+  // "ready" is true of what is built, and the detail carries the limit: opening
+  // a page works, reading one back does not. The tools say so themselves in
+  // their descriptions, so the planner cannot plan around a capability we lack.
+  agent.setSubsystem({
+    name: 'browser',
+    status: 'ready',
+    detail: 'opens pages and searches — cannot read pages back (Playwright is Phase 6)',
+  });
 
   // Whether an API key exists is an async question, and blocking startup on the
   // secret store would make the window slow to appear for a fact the UI can
