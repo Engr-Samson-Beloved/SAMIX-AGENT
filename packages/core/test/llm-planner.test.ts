@@ -303,6 +303,21 @@ describe('LlmPlanner.plan', () => {
     assert.match(system, /Never claim an action has happened/);
     assert.match(system, new RegExp(ASK_USER_FUNCTION));
   });
+
+  test('tells the model the tool list is the whole answer to "what can you do"', async () => {
+    // Found live: asked to open Chrome, the model called agent.getStatus to look
+    // up its own capabilities, then reported "The results do not answer the
+    // question." The catalogue is already in front of it; a reconnaissance call
+    // costs a round trip and ends in a non-answer.
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.plan(planRequest('open chrome'));
+
+    const system = requests[0]!.system;
+    assert.match(system, /complete and\s+authoritative/);
+    assert.match(system, /Never call a tool to find out what\s+you are capable of/);
+    assert.match(system, /call no tools at all/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -408,6 +423,18 @@ describe('LlmPlanner.summarise', () => {
     await planner.summarise(summaryRequest([succeededStep]));
 
     assert.deepEqual(requests[0]!.tools, []);
+  });
+
+  test('requires a non-answer to name what could not be determined', async () => {
+    // "The results do not answer the question." is true, and useless. If the
+    // report stage has to admit a gap it must say which gap.
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.summarise(summaryRequest([succeededStep]));
+
+    const system = requests[0]!.system;
+    assert.match(system, /name the specific thing you could not\s+determine/);
+    assert.match(system, /never an acceptable answer/);
   });
 
   test('uses the fast model, because this turn sits between the user and the answer', async () => {
