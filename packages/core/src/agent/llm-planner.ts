@@ -6,6 +6,7 @@ import { LlmError, type LlmMessage, type LlmProvider, type LlmResponse, type Llm
 import type { Logger } from '../observability/logger.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type {
+  ConversationTurn,
   PlanRequest,
   PlanResult,
   PlannedStep,
@@ -78,9 +79,16 @@ export class LlmPlanner implements Planner {
   async plan(request: PlanRequest): Promise<PlanResult> {
     const config = this.deps.config();
     const tools = this.deps.registry.toLlmSchemas(request.mode);
-    const route = this.deps.router.select({ kind: 'plan', instruction: request.task.instruction });
+    const route = this.deps.router.select({
+      kind: 'plan',
+      instruction: request.task.instruction,
+      historyLength: request.history.length,
+    });
 
-    const messages: LlmMessage[] = [{ role: 'user', text: request.task.instruction }];
+    const messages: LlmMessage[] = [
+      ...toConversationMessages(request.history),
+      { role: 'user', text: request.task.instruction },
+    ];
     const system = this.buildSystemPrompt(request.mode, 'plan');
 
     const budget = this.checkContextBudget(system, messages, tools, config);
@@ -179,7 +187,7 @@ export class LlmPlanner implements Planner {
     }
     messages.push({
       role: 'user',
-      text: 'Now answer my original question using those results. Do not describe the steps.',
+      text: 'Now report back on that, using those results. Do not describe the steps.',
     });
 
     // Routed to the fast model: this turn has no decisions in it, only phrasing
@@ -191,15 +199,25 @@ export class LlmPlanner implements Planner {
       const response = await this.deps.provider.generate({
         model: route.model,
         system: [
-          `You are SAMIX Agent reporting back to the person who asked. Answer their question directly`,
-          `from the tool results provided, in one or two short sentences of plain prose.`,
+          `You are SAMIX Agent reporting back to the person who asked, in one or two short`,
+          `sentences of plain prose.`,
+          ``,
+          `First decide which kind of instruction you are reporting on:`,
+          ``,
+          `  - They asked for INFORMATION ("what is my CPU?", "find my latest PDF") — answer the`,
+          `    question directly from the tool results.`,
+          `  - They asked you to DO something ("open Notepad", "close it", "copy that file") —`,
+          `    say what was done, naming the specific thing acted on. There is no question to`,
+          `    answer here, so never report that you could not find one.`,
+          ``,
+          `In both cases:`,
           ``,
           `  - State only what the results actually show. Never add, estimate or infer a fact that`,
           `    is not in them, and never fill a gap with something plausible.`,
-          `  - If the results do not answer the question, name the specific thing you could not`,
-          `    determine — "I could not find out X" — rather than commenting on the results`,
-          `    themselves. "The results do not answer the question" tells the reader nothing they`,
-          `    can act on and is never an acceptable answer.`,
+          `  - If they asked for information and the results do not contain it, name the specific`,
+          `    thing you could not determine — "I could not find out X". Never comment on the`,
+          `    results themselves; "the results do not answer the question" tells the reader`,
+          `    nothing they can act on.`,
           `  - Do not narrate the steps, name the tools, or mention that you used any.`,
           `  - No preamble, no sign-off, no markdown.`,
         ].join('\n'),
@@ -448,9 +466,14 @@ export class LlmPlanner implements Planner {
       `5. Prefer the fewest steps that genuinely accomplish the task. Do not pad a plan with`,
       `   verification steps — verification is automatic and is not your responsibility.`,
       `6. If the request needs no tools at all, just answer it in plain text.`,
+      `7. Earlier turns of this conversation are shown above, and they are yours. Resolve "it",`,
+      `   "that", "this one" and "do it then" against them instead of asking what the user means —`,
+      `   if you offered something last turn and they said yes, do the thing you offered. Only ask`,
+      `   when the history genuinely does not settle it. Note this is dialogue memory, not a record`,
+      `   of the machine's current state: re-check anything that may have changed since.`,
       ...(phase === 'recover'
         ? [
-            `7. A step has just failed. Read the error code and change your approach; repeating the`,
+            `8. A step has just failed. Read the error code and change your approach; repeating the`,
             `   identical call will fail identically. If nothing sensible remains, say so in plain`,
             `   text — that is a valid and useful answer, and better than a plan you do not believe in.`,
           ]
@@ -513,6 +536,38 @@ export class LlmPlanner implements Planner {
     const message = error.userMessage();
     return phase === 'plan' ? { kind: 'reply', message } : { kind: 'give-up', reason: message };
   }
+}
+
+/** Longest prior reply replayed verbatim. Older turns matter less than the current one. */
+const MAX_HISTORY_REPLY = 320;
+
+/**
+ * Replay earlier exchanges as alternating turns.
+ *
+ * The tool names are appended to the model's own turn rather than sent as
+ * `toolCalls`, on purpose. A real `toolCalls` turn must be followed by a matching
+ * tool-result turn or the provider rejects the conversation as malformed, and
+ * replaying full results is exactly the unbounded growth this is avoiding.
+ * Naming the tools in prose gives the model what it needs to resolve "close it"
+ * — which application it opened — at a fraction of the size.
+ */
+function toConversationMessages(history: readonly ConversationTurn[]): LlmMessage[] {
+  const messages: LlmMessage[] = [];
+
+  for (const turn of history) {
+    messages.push({ role: 'user', text: turn.instruction });
+
+    const used = [...new Set(turn.tools)];
+    const note = used.length > 0 ? ` [used: ${used.join(', ')}]` : '';
+    const reply =
+      turn.reply.length > MAX_HISTORY_REPLY
+        ? `${turn.reply.slice(0, MAX_HISTORY_REPLY - 1)}…`
+        : turn.reply;
+
+    messages.push({ role: 'model', text: `${reply}${note}` });
+  }
+
+  return messages;
 }
 
 const AskUserArgs = z.object({

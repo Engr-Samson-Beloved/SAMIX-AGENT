@@ -18,9 +18,18 @@ import type { PermissionEngine } from '../security/permissions.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { CancellationToken } from './cancellation.js';
 import { type StepExecutor } from './executor.js';
-import { toTaskSteps, type Planner } from './planner.js';
+import { toTaskSteps, type ConversationTurn, type Planner } from './planner.js';
 import { AgentStateMachine } from './state-machine.js';
 import { type TaskManager } from './task-manager.js';
+
+/**
+ * How many completed exchanges the planner is shown.
+ *
+ * Six covers the follow-ups people actually make ("do that then", "close it",
+ * "the other one") without letting a long session push the request towards the
+ * context budget. Real conversation memory with summarisation is Phase 9.
+ */
+const CONVERSATION_TURNS = 6;
 
 /**
  * Agent orchestrator (spec §27, §77, §78).
@@ -197,6 +206,7 @@ export class Agent {
         task: this.requireTask(),
         mode: this.mode,
         availableTools: this.deps.registry.availableIn(this.mode).map((t) => t.name),
+        history: this.conversation(),
         signal: this.token.signal,
       });
 
@@ -336,6 +346,7 @@ export class Agent {
       task: this.requireTask(),
       mode: this.mode,
       availableTools: this.deps.registry.availableIn(this.mode).map((t) => t.name),
+      history: this.conversation(),
       signal: this.token.signal,
       failedStep: step,
       error,
@@ -581,8 +592,25 @@ export class Agent {
       return `I completed ${done} of ${task.steps.length} steps; ${failed} failed.`;
     }
     if (unverified > 0) {
+      // Say what the verifier *did* establish, not merely that it fell short.
+      // "I completed 1 step, but could not confirm it" is true and useless: the
+      // browser did open, and the detail already on the step says so. Withholding
+      // it reads as failure for work that largely succeeded, which is its own
+      // kind of dishonesty — development rule 25 forbids overclaiming, not
+      // reporting.
+      const findings = task.steps
+        .filter((s) => s.status === 'succeeded_unverified')
+        .map((s) => s.verification?.detail?.trim())
+        .filter((detail): detail is string => Boolean(detail))
+        // Details are written as free text by each verifier, so terminal
+        // punctuation cannot be assumed — without this they run together into
+        // one unreadable sentence.
+        .map((detail) => (/[.!?]$/.test(detail) ? detail : `${detail}.`));
+
       const noun = unverified === 1 ? 'it' : `${unverified} of them`;
-      return `I completed ${done} step${done === 1 ? '' : 's'}, but could not confirm ${noun}. I have not assumed that succeeded.`;
+      const observed = findings.length > 0 ? ` ${findings.join(' ')}` : '';
+
+      return `I completed ${done} step${done === 1 ? '' : 's'}, but could not confirm ${noun}.${observed}`;
     }
 
     // A single verified step: answer with its result rather than narrating.
@@ -590,6 +618,33 @@ export class Agent {
       return `Done. ${task.steps[0]!.description}.`;
     }
     return `Done. I completed and verified all ${done} steps.`;
+  }
+
+  /**
+   * The last few completed exchanges, oldest-first.
+   *
+   * Without this the agent offers to do something, the user says "yes do that",
+   * and the next turn has never heard of the offer — which is how it ends up
+   * asking the user to clarify a request it made itself. Observed in real use;
+   * it is the single thing that most stops the agent feeling like an agent.
+   *
+   * Bounded at {@link CONVERSATION_TURNS}. Unbounded history would grow every
+   * request until the context-budget guard refused the task outright, and the
+   * failure would arrive later and be harder to explain than a short memory.
+   */
+  private conversation(): ConversationTurn[] {
+    const active = this.deps.tasks.activeTask?.id;
+
+    return this.deps.tasks
+      .recent(CONVERSATION_TURNS + 1)
+      .filter((task) => task.id !== active && task.summary !== undefined)
+      .slice(0, CONVERSATION_TURNS)
+      .reverse() // `recent()` is newest-first; a conversation reads forwards.
+      .map((task) => ({
+        instruction: task.instruction,
+        reply: task.summary ?? '',
+        tools: task.steps.map((step) => step.tool),
+      }));
   }
 
   private requireTask(): Task {

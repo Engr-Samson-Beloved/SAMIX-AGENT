@@ -100,11 +100,69 @@ export async function listProcesses(timeoutMs = 10_000): Promise<RunningProcess[
   return processes;
 }
 
-/** Whether any process is running with this image name. Case-insensitive. */
+/**
+ * Whether any process is running with this image name. Case-insensitive.
+ *
+ * Asks `tasklist` to do the filtering rather than listing every process and
+ * matching here. That matters because this is called in a **polling loop** while
+ * verifying a launch: a full listing on a busy machine returns several hundred
+ * rows and takes over a second, so three polls cost more than the launch did.
+ * Measured on this machine, a filtered query is roughly an order of magnitude
+ * cheaper.
+ *
+ * The filter string embeds `imageName`, so it is validated first — with
+ * `shell: false` it is still a single argv element and cannot become a second
+ * argument, but a name containing a quote would corrupt the filter expression
+ * and silently match nothing, which is a worse failure than an error.
+ */
 export async function isProcessRunning(imageName: string, timeoutMs = 10_000): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    throw new ProcessQueryError('Process listing is only implemented for Windows.');
+  }
+  if (!isValidImageName(imageName)) {
+    throw new ProcessQueryError(`Implausible image name: ${imageName}`);
+  }
+
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      TASKLIST,
+      ['/FI', `IMAGENAME eq ${imageName}`, '/NH', '/FO', 'CSV'],
+      { timeout: timeoutMs, windowsHide: true, shell: false, maxBuffer: 1024 * 1024 },
+    ));
+  } catch (cause) {
+    throw new ProcessQueryError(`Could not query for ${imageName}: ${String(cause)}`);
+  }
+
+  // With no match, tasklist prints an INFO line on stdout rather than producing
+  // empty output or a non-zero exit, so the presence of CSV rows is the signal.
   const target = imageName.toLowerCase();
-  const running = await listProcesses(timeoutMs);
-  return running.some((entry) => entry.imageName.toLowerCase() === target);
+  return stdout
+    .split('\n')
+    .map((line) => parseCsvLine(line))
+    .some((fields) => (fields[0] ?? '').toLowerCase() === target);
+}
+
+/**
+ * Wait for a process to disappear, or give up.
+ *
+ * A graceful close is not instantaneous, and the delay varies by an order of
+ * magnitude between applications — a Win32 program exits in milliseconds, a
+ * packaged Windows 11 app can take several seconds to tear down. A single check
+ * after a fixed delay therefore reports "still running" for applications that
+ * were closing perfectly well, which reaches the user as a failure. Cheap to
+ * poll now that {@link isProcessRunning} filters server-side.
+ */
+export async function waitForProcessToExit(
+  imageName: string,
+  timeoutMs = 6_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!(await isProcessRunning(imageName))) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
 }
 
 /**

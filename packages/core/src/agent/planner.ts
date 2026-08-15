@@ -19,11 +19,32 @@ import type { ToolRegistry } from '../tools/registry.js';
  *                 external action is about to happen; stop and ask.
  */
 
+/**
+ * One completed exchange, oldest-first, for multi-turn context.
+ *
+ * Deliberately not the whole `Task`. Feeding back full step results would grow
+ * the request without bound and bury the current instruction under tool output
+ * the model has already reasoned about once. What a follow-up actually needs is
+ * what was asked, what was answered, and which tools were involved — enough to
+ * resolve "do that then", "close it" and "the other one".
+ */
+export interface ConversationTurn {
+  readonly instruction: string;
+  /** The sentence the user was given. */
+  readonly reply: string;
+  readonly tools: readonly string[];
+}
+
 export interface PlanRequest {
   readonly task: Task;
   readonly mode: AgentMode;
   /** Tools available in the current mode, already filtered. */
   readonly availableTools: readonly string[];
+  /**
+   * Earlier exchanges in this session, oldest-first. Empty on the first
+   * instruction. A planner may ignore it; the rule-based one does.
+   */
+  readonly history: readonly ConversationTurn[];
   readonly signal: AbortSignal;
 }
 

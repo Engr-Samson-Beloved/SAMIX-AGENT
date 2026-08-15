@@ -117,6 +117,7 @@ function planRequest(instruction: string, overrides: Partial<PlanRequest> = {}):
     },
     mode: 'controlled',
     availableTools: ['system.getInfo'],
+    history: [],
     signal: new AbortController().signal,
     ...overrides,
   } as PlanRequest;
@@ -304,6 +305,88 @@ describe('LlmPlanner.plan', () => {
     assert.match(system, new RegExp(ASK_USER_FUNCTION));
   });
 
+  test('replays earlier turns so a follow-up can be resolved', async () => {
+    // The failure this exists for, observed in real use: the agent offered to
+    // run a search, the user replied "yes do that then", and the next turn had
+    // never heard of the offer — so it asked the user to clarify a request it
+    // had made itself.
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.plan(
+      planRequest('yes do that then', {
+        history: [
+          {
+            instruction: 'search for me and screenshot it',
+            reply: 'I cannot take screenshots. Shall I open the search for you to view?',
+            tools: [],
+          },
+        ],
+      }),
+    );
+
+    const messages = requests[0]!.messages;
+    assert.equal(messages.length, 3, 'one turn replays as user + model, then the new instruction');
+    assert.deepEqual(messages[0], {
+      role: 'user',
+      text: 'search for me and screenshot it',
+    });
+    assert.equal(messages[1]!.role, 'model');
+    assert.match((messages[1] as { text: string }).text, /Shall I open the search/);
+    assert.deepEqual(messages[2], { role: 'user', text: 'yes do that then' });
+  });
+
+  test('names the tools an earlier turn used, so "close it" has a referent', async () => {
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.plan(
+      planRequest('close it', {
+        history: [
+          { instruction: 'open chrome', reply: 'Opened Google Chrome.', tools: ['app.launch'] },
+        ],
+      }),
+    );
+
+    assert.match((requests[0]!.messages[1] as { text: string }).text, /app\.launch/);
+  });
+
+  test('truncates a long earlier reply rather than letting history crowd out the request', async () => {
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.plan(
+      planRequest('and now?', {
+        history: [{ instruction: 'list everything', reply: 'x'.repeat(5_000), tools: [] }],
+      }),
+    );
+
+    const replayed = (requests[0]!.messages[1] as { text: string }).text;
+    assert.ok(replayed.length < 400, `replayed reply should be trimmed, was ${replayed.length}`);
+    assert.match(replayed, /…$/);
+  });
+
+  test('a follow-up turn uses the planner model, never the fast one', async () => {
+    // Routing already refuses to step down mid-conversation; this pins it,
+    // because a follow-up is exactly where cheap models lose the thread.
+    const config = defaultConfig();
+    const { planner, requests } = makePlanner([{ text: 'ok' }], config);
+
+    await planner.plan(
+      planRequest('yes', {
+        history: [{ instruction: 'open chrome?', reply: 'Shall I?', tools: [] }],
+      }),
+    );
+
+    assert.equal(requests[0]!.model, config.llm.plannerModel);
+  });
+
+  test('tells the model to resolve pronouns against the conversation', async () => {
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.plan(planRequest('hello'));
+
+    assert.match(requests[0]!.system, /Resolve "it",/);
+    assert.match(requests[0]!.system, /instead of asking what the user means/);
+  });
+
   test('tells the model the tool list is the whole answer to "what can you do"', async () => {
     // Found live: asked to open Chrome, the model called agent.getStatus to look
     // up its own capabilities, then reported "The results do not answer the
@@ -433,8 +516,24 @@ describe('LlmPlanner.summarise', () => {
     await planner.summarise(summaryRequest([succeededStep]));
 
     const system = requests[0]!.system;
-    assert.match(system, /name the specific thing you could not\s+determine/);
-    assert.match(system, /never an acceptable answer/);
+    assert.match(system, /name the specific\s+thing you could not determine/);
+    assert.match(system, /tells the reader\s+nothing they can act on/);
+  });
+
+  test('separates reporting an action from answering a question', async () => {
+    // Regression: "close it" produced "I could not find out your original
+    // question." The prompt assumed every instruction was a question, so an
+    // action instruction had no correct shape to report in.
+    const { planner, requests } = makePlanner([{ text: 'ok' }]);
+
+    await planner.summarise(summaryRequest([succeededStep]));
+
+    const system = requests[0]!.system;
+    assert.match(system, /They asked you to DO something/);
+    assert.match(system, /never report that you could not find one/);
+    // The closing user turn must not presuppose a question either.
+    const last = requests[0]!.messages.at(-1) as { text: string };
+    assert.doesNotMatch(last.text, /original question/);
   });
 
   test('uses the fast model, because this turn sits between the user and the answer', async () => {

@@ -65,6 +65,14 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolRegistry {
   const apps = deps.apps ?? new AppRegistry();
   const policy = deps.pathPolicy;
 
+  // Warm the application cache in the background. Discovery scans Program Files
+  // and takes a noticeable second or two; paying it here means the user pays it
+  // during startup, where nothing is waiting, rather than inside their first
+  // "open Chrome" — where it was measured adding seconds to a launch that
+  // otherwise takes milliseconds. Failure is ignored on purpose: the tools call
+  // `list()` themselves and will simply discover then.
+  void apps.list().catch(() => undefined);
+
   const erase = (tool: AgentTool<never, never>): AgentTool<never, unknown> =>
     tool as unknown as AgentTool<never, unknown>;
 

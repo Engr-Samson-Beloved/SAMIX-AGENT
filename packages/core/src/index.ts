@@ -120,6 +120,7 @@ export {
   isProcessRunning,
   isValidImageName,
   listProcesses,
+  waitForProcessToExit,
 } from './tools/windows/processes.js';
 export type { RunningProcess } from './tools/windows/processes.js';
 

@@ -9,7 +9,12 @@ import {
   type Verification,
 } from '@samix/shared';
 import type { AppRegistry, DiscoveredApp } from './app-registry.js';
-import { closeProcess, isProcessRunning, listProcesses } from '../windows/processes.js';
+import {
+  closeProcess,
+  isProcessRunning,
+  listProcesses,
+  waitForProcessToExit,
+} from '../windows/processes.js';
 
 /**
  * Application and process tools (spec §13, §14) — Phase 5.
@@ -260,16 +265,19 @@ export function createAppCloseTool(
       const app = await apps.resolve(input.name);
       if (!app) return verification('unverified', 'The application could no longer be resolved.');
 
-      // A graceful close is not instant; give the window a moment to go.
-      await new Promise((resolve) => setTimeout(resolve, 1_200));
       try {
-        const stillRunning = await isProcessRunning(app.imageName);
-        return stillRunning
-          ? verification(
+        const gone = await waitForProcessToExit(app.imageName);
+        return gone
+          ? verification('verified', `No ${app.imageName} process remains.`)
+          : verification(
               'failed',
-              `${app.displayName} is still running — it likely asked to save changes first.`,
-            )
-          : verification('verified', `No ${app.imageName} process remains.`);
+              // Deliberately does not assert *why*. The obvious guess — "it
+              // asked to save changes" — is often wrong (the app may simply be
+              // slow, or ignore close requests), and a confident wrong reason
+              // sends the user looking for a dialog that is not there.
+              `${app.displayName} is still running. It may be showing a prompt that needs an ` +
+                `answer, or it may not respond to a close request.`,
+            );
       } catch (cause) {
         return verification('unverified', `Could not read the process list: ${String(cause)}`);
       }

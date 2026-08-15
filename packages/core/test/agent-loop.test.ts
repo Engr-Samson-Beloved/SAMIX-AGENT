@@ -117,6 +117,56 @@ describe('the Phase 1 loop, end to end', () => {
     assert.doesNotThrow(() => rt.agent.submit('status', 'text'));
   });
 
+  it('shows the planner what was said and answered on the previous turn', async () => {
+    // The wiring behind multi-turn follow-ups. Without it the agent can offer
+    // something and then not know it offered — which is how "yes, do that"
+    // became "could you please clarify?" in real use.
+    const seen: Array<readonly { instruction: string; reply: string; tools: readonly string[] }[]> = [];
+    const rt = build({
+      planner: {
+        name: 'recording (test)',
+        plan: (request) => {
+          seen.push(request.history);
+          return Promise.resolve<PlanResult>({ kind: 'reply', message: 'noted' });
+        },
+      },
+    });
+
+    const first = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('what can you do?', 'text');
+    await first.done;
+
+    const second = watch(rt);
+    rt.agent.submit('do that then', 'text');
+    await second.done;
+
+    assert.deepEqual(seen[0], [], 'the first instruction has no history');
+    assert.equal(seen[1]?.length, 1, 'the second sees exactly the first exchange');
+    assert.equal(seen[1]?.[0]?.instruction, 'what can you do?');
+    assert.equal(seen[1]?.[0]?.reply, 'noted');
+  });
+
+  it('never includes the in-flight task in its own history', async () => {
+    const seen: Array<readonly unknown[]> = [];
+    const rt = build({
+      planner: {
+        name: 'recording (test)',
+        plan: (request) => {
+          seen.push(request.history);
+          return Promise.resolve<PlanResult>({ kind: 'reply', message: 'ok' });
+        },
+      },
+    });
+
+    const { done } = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('only instruction', 'text');
+    await done;
+
+    assert.deepEqual(seen[0], [], 'a task must not see itself as prior context');
+  });
+
   /** One machine, one desktop: concurrent automation is a correctness hazard. */
   it('refuses a second concurrent task rather than queueing it', () => {
     const rt = build({ planner: { name: 'slow', plan: () => new Promise<PlanResult>(() => {}) } });
