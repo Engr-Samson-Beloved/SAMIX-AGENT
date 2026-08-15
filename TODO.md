@@ -113,25 +113,64 @@ tool for "Delete the thing I mentioned earlier."
 
 ## Phase 4 — Filesystem
 
-- [ ] `filesystem.{listDirectory,search,read,copy,move,rename,delete,
-      createDirectory,exists,getMetadata,open}`.
-- [ ] Every path passes `PathPolicy` (already built and tested).
-- [ ] Real verifiers: after a copy, confirm the destination exists and matches
-      size/hash. This is the first true test of the verification pipeline.
-- [ ] `delete` is `destructive` + `irreversible` and must implement
-      `describeEffect()` with the file count (spec §95).
+- [x] ~~`filesystem.{listDirectory,search,readTextFile,getMetadata,
+      createDirectory,copy,move,rename,delete}`.~~ Nine tools shipped.
+- [x] ~~Every path passes `PathPolicy`.~~ Through one shared `guardPath()`, so
+      the property is "one function" rather than "nine authors remembered".
+- [x] ~~Real verifiers.~~ Copy compares destination size against source; move
+      checks both ends (arrival *and* departure — the half-state is the
+      dangerous one); delete confirms absence.
+- [x] ~~`delete` is `destructive` + `irreversible` with `describeEffect()`.~~
+- [ ] **`describeEffect()` cannot state the file count**, which is what spec §95
+      actually asks for ("this will permanently delete 184 files"). The contract
+      is synchronous, so it cannot stat the tree. Either make it async or have
+      the executor pass a pre-computed effect. The count *is* gathered during
+      execute and reported afterwards; it is only missing from the prompt.
+- [ ] **Untrusted paths cannot request confirmation**, so the guard refuses
+      untrusted *writes* outright instead. Spec §39 wants "untrusted requires
+      confirmation even for reads", which needs the permission engine to accept
+      a runtime path decision, not just a tool's declared level. Reasoned
+      through in `filesystem/guard.ts`.
+- [ ] `filesystem.writeTextFile` — creating a file with content is still missing.
+- [ ] Deletes bypass the Recycle Bin. A native shell call or an app-owned trash
+      folder would make them recoverable; both are real design decisions.
+- [ ] Hash comparison for copy verification. Size matching catches truncation,
+      which is the common failure, but not corruption.
 
-*Success:* "Find my latest PDF and copy it to Desktop" works end to end.
+*Success:* achieved — "What are the 3 most recently modified files in my
+Downloads folder?" is answered from a real search.
 
 ## Phase 5 — Applications & processes
 
-- [ ] Application registry with discovery (spec §14).
-- [ ] `process.{list,find,launch,close,focus,isRunning}`.
-- [ ] Never allow unrestricted process termination (spec §13).
+- [x] ~~Application registry with discovery (spec §14).~~ Curated table probed at
+      documented install locations, plus a depth-limited scan of the install
+      roots filtered by a "is this the main binary?" heuristic.
+- [x] ~~`app.{list,launch,close}` and `process.list`.~~
+- [x] ~~Never allow unrestricted process termination (spec §13).~~ `taskkill`
+      without `/F`, so an app with unsaved work keeps it and the refusal is
+      reported honestly instead of being forced.
+- [x] ~~No arbitrary-executable primitive.~~ `app.launch` takes a *name*
+      resolved against discovery, never a path, and `NEVER_LAUNCHABLE` refuses
+      shells, interpreters and living-off-the-land binaries even when found.
+- [ ] `process.find`, `focus` and window management. Focus needs UI Automation
+      (Phase 7); there is no way to raise a window from Node alone.
+- [ ] Discovery misses apps whose binary is not named after its folder — the
+      heuristic errs towards omitting rather than listing noise. Reading the
+      `App Paths` registry key would close most of the gap.
+
+*Success:* achieved — "Open Chrome" works.
 
 ## Phase 6 — Browser
 
-- [ ] Playwright, DOM-first (spec §19).
+- [x] ~~Opening pages and searches in the user's real browser.~~
+      `browser.openUrl` and `browser.search`, `external` permission so they
+      confirm first, restricted to `http`/`https` — `file:`, `javascript:` and
+      `data:` are refused, since the first would bypass `PathPolicy` entirely
+      and the others are script execution.
+- [ ] **Playwright, DOM-first (spec §19).** Still the whole of real browser
+      automation: reading a page, clicking, filling forms. Note the tools above
+      deliberately drive the user's *own* browser with their own session, which
+      Playwright cannot do; these are complements, not a first draft of it.
 - [ ] Download handling into the filesystem pipeline (spec §60).
 
 ## Phase 7 — Windows UI automation

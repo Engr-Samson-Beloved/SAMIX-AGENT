@@ -88,7 +88,40 @@ export type { SecretKey, SecretStore } from './security/secrets.js';
 
 export { ToolRegistry, ToolRegistrationError, createToolRegistry } from './tools/index.js';
 export { systemGetInfoTool, createAgentGetStatusTool } from './tools/index.js';
-export type { AgentStatusReport, StatusProvider, SystemInfo } from './tools/index.js';
+export type { AgentStatusReport, StatusProvider, SystemInfo, ToolRegistryDeps } from './tools/index.js';
+
+// Phase 4 — filesystem
+export {
+  createCopyTool,
+  createCreateDirectoryTool,
+  createDeleteTool,
+  createListDirectoryTool,
+  createMetadataTool,
+  createMoveTool,
+  createReadTextFileTool,
+  createRenameTool,
+  createSearchTool,
+} from './tools/filesystem/tools.js';
+export { formatBytes, guardPath, shorthandNames, toAbsolutePath } from './tools/filesystem/guard.js';
+export type { GuardedPath, PathIntent } from './tools/filesystem/guard.js';
+
+// Phase 5 — applications and processes
+export { AppRegistry, discoverApps, isLaunchable } from './tools/apps/app-registry.js';
+export type { AppKind, DiscoveredApp } from './tools/apps/app-registry.js';
+export {
+  createAppCloseTool,
+  createAppLaunchTool,
+  createAppListTool,
+  processListTool,
+} from './tools/apps/tools.js';
+export { createBrowserOpenUrlTool, createBrowserSearchTool } from './tools/apps/browser.js';
+export {
+  closeProcess,
+  isProcessRunning,
+  isValidImageName,
+  listProcesses,
+} from './tools/windows/processes.js';
+export type { RunningProcess } from './tools/windows/processes.js';
 
 export { RpcRouter } from './rpc/router.js';
 export type { RouterResult } from './rpc/router.js';

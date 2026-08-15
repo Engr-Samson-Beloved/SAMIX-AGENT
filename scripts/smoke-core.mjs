@@ -118,7 +118,20 @@ async function main() {
   check('starts in CONTROLLED mode (spec §55)', status.result?.mode === 'controlled');
 
   const tools = await request('tools.list', {});
-  check('two Phase 1 tools are registered', tools.result?.length === 2, JSON.stringify(tools.result));
+  const names = (tools.result ?? []).map((tool) => tool.name);
+  // Asserted by namespace rather than by count: a count breaks every time a
+  // tool is added, which trains people to update the number without reading it.
+  for (const expected of [
+    'system.getInfo',
+    'agent.getStatus',
+    'filesystem.search',
+    'filesystem.copy',
+    'filesystem.delete',
+    'app.launch',
+    'browser.search',
+  ]) {
+    check(`${expected} is registered`, names.includes(expected), names.join(', '));
+  }
 
   // --- a real task through the real pipe ---------------------------------
   const submitted = await request('task.submit', {

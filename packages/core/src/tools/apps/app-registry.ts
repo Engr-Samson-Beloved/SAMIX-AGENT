@@ -95,7 +95,8 @@ const NEVER_LAUNCHABLE: ReadonlySet<string> = new Set([
 ]);
 
 /** Noise that a directory scan turns up but nobody means by "open X". */
-const SCAN_EXCLUDE = /unins|setup|update|upgrade|crash|report|helper|service|daemon|watchdog|elevate|repair|_?debug|redist|vcredist/i;
+const SCAN_EXCLUDE =
+  /unins|install|setup|update|upgrade|crash|report|helper|service|daemon|watchdog|elevate|repair|_?debug|redist|vcredist|diagnos/i;
 
 interface KnownApp {
   readonly id: string;
@@ -303,13 +304,50 @@ export async function discoverApps(): Promise<DiscoveredApp[]> {
     await scan(root, SCAN_DEPTH, found);
   }
 
-  return [...found.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  // Curated entries first. They are the ones with real names and aliases, and
+  // the ones a user is overwhelmingly likely to mean — an alphabetical list that
+  // opens with "Antigravity" and buries Chrome is technically complete and
+  // practically useless.
+  const curatedIds = new Set(KNOWN_APPS.map((app) => app.id));
+  return [...found.values()].sort((a, b) => {
+    const rank = Number(curatedIds.has(b.id)) - Number(curatedIds.has(a.id));
+    return rank !== 0 ? rank : a.displayName.localeCompare(b.displayName);
+  });
+}
+
+/**
+ * Is this `.exe` the program a person would name, or one of its parts?
+ *
+ * A depth-limited scan of Program Files turns up far more than applications:
+ * `ffmpeg.exe`, `git-receive-pack.exe`, `nvidia-smi.exe`, `ExtExport.exe`. All
+ * are real executables and none is something a user means by "open X" — and a
+ * list dominated by them is worse than no list, because the planner reads it and
+ * offers the user nonsense.
+ *
+ * The heuristic: a program's main binary is almost always named after the folder
+ * that contains it — `Cursor\Cursor.exe`, `Notepad++\notepad++.exe`. Helpers and
+ * command-line tools sit in `bin\`, `tools\` or beside a differently-named
+ * parent, and fail the test.
+ *
+ * It is a heuristic, and it will miss some real applications. That is the right
+ * direction to be wrong in: a missing entry is recoverable — the user says the
+ * name and `resolve()` still finds it through the curated table — while a list
+ * full of `gpgme-w32spawn` teaches the user the feature does not work.
+ */
+function looksLikeMainExecutable(directory: string, fileName: string): boolean {
+  const simplify = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const base = simplify(fileName.replace(/\.exe$/i, ''));
+  const parent = simplify(path.basename(directory));
+  if (base.length < 3 || parent.length < 3) return false;
+
+  return parent.includes(base) || base.includes(parent);
 }
 
 async function scan(directory: string, depth: number, into: Map<string, DiscoveredApp>): Promise<void> {
   if (depth < 0) return;
 
-  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(directory, { withFileTypes: true });
   } catch {
@@ -327,6 +365,7 @@ async function scan(directory: string, depth: number, into: Map<string, Discover
     }
     if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.exe')) continue;
     if (SCAN_EXCLUDE.test(entry.name) || !isLaunchable(full)) continue;
+    if (!looksLikeMainExecutable(directory, entry.name)) continue;
 
     const id = entry.name.replace(/\.exe$/i, '').toLowerCase();
     // The curated table is authoritative: it has better names and aliases.
@@ -385,8 +424,14 @@ export class AppRegistry {
   async suggestions(limit = 12): Promise<string[]> {
     const apps = await this.list();
     // Curated entries carry aliases; surfacing those first gives a more useful
-    // list than the alphabetical head of a Program Files scan.
+    // list than the alphabetical head of a Program Files scan. Deduplicated,
+    // because the curated set is a subset of `apps` rather than a disjoint one.
     const curated = apps.filter((app) => app.aliases.length > 0 || app.kind !== 'utility');
-    return [...curated, ...apps].slice(0, limit).map((app) => app.displayName);
+    const ordered = new Map<string, string>();
+    for (const app of [...curated, ...apps]) {
+      if (ordered.size >= limit) break;
+      ordered.set(app.id, app.displayName);
+    }
+    return [...ordered.values()];
   }
 }

@@ -4,12 +4,13 @@ A local-first autonomous computer agent for Windows. You speak or type an
 instruction; the agent plans it, executes real operations through explicit
 tools, **verifies that they actually happened**, and reports what it did.
 
-> **Status: Phases 1 and 3 complete.** The runtime, permission system,
-> verification pipeline, observability and desktop shell are built and tested
-> (Phase 1), and the agent now plans with Google Gemini and answers in its own
-> words (Phase 3). Voice is Phase 2 and filesystem tools are Phase 4, so the
-> agent can currently *reason* about far more than it can *do*. See
-> [`docs/PHASE-1-REPORT.md`](docs/PHASE-1-REPORT.md).
+> **Status: Phases 1, 3, 4 and 5 complete; Phase 6 partially.** The runtime,
+> safety model and verification pipeline are built and tested (Phase 1); the
+> agent plans with Google Gemini (Phase 3); and it acts on the machine through
+> 17 tools — files, applications, processes, and opening web pages in your real
+> browser (Phases 4–6). Still missing: voice (Phase 2), reading web pages back
+> (Phase 6), screen control (Phase 7), messaging (Phase 8) and memory between
+> instructions (Phase 9). Start here: **[docs/USING-SAMIX.md](docs/USING-SAMIX.md)**.
 
 ---
 
@@ -140,14 +141,15 @@ pnpm repl
 
 | Say | What happens |
 | --- | --- |
-| `What OS and CPU is this computer running?` | `system.getInfo` → verified → *"This computer is running Windows 11 Home on an Intel Core i7-4800MQ."* |
-| `What is your current mode and which tools do you have?` | `agent.getStatus` → answered from the real result |
-| `Delete the thing I mentioned earlier.` | asks which thing — it does **not** invent a delete tool |
+| `What OS and CPU is this computer running?` | `system.getInfo` → verified → *"…Windows 11 Home on an Intel Core i7-4800MQ."* |
+| `What are my 3 most recently modified files in Downloads?` | `filesystem.search` → answered from the real result |
+| `Open Chrome and search for the weather in Lagos` | confirms first, then opens it in your real browser |
+| `Delete the thing I mentioned earlier.` | asks which thing — it does **not** guess a file |
 
-That last row is the point. Only two tools exist so far, and the model is not
-permitted to pretend otherwise: every call it proposes is re-validated against
-the registry, the current mode and the tool's real input schema before anything
-runs. ([ADR-0005](docs/ADR-0005-llm-layer.md))
+Every call the model proposes is re-validated against the registry, the current
+mode and the tool's real input schema before anything runs
+([ADR-0005](docs/ADR-0005-llm-layer.md)). Full walkthrough, including what it
+*cannot* do yet: **[docs/USING-SAMIX.md](docs/USING-SAMIX.md)**.
 
 ---
 

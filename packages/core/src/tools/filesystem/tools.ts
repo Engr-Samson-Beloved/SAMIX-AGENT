@@ -1,3 +1,4 @@
+import type { Dirent } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
@@ -119,7 +120,12 @@ export function createListDirectoryTool(
 
       try {
         const names = await fs.readdir(guarded.path.absolute);
-        const visible = input.includeHidden ? names : names.filter((n) => !n.startsWith('.'));
+        const visible = (input.includeHidden ? names : names.filter((n) => !n.startsWith('.')))
+          // Same reasoning as the search walk: a deny pattern usually matches
+          // the file, not its folder, so a listing of a permitted directory can
+          // still enumerate blocked entries by name. Names alone are worth
+          // withholding — `id_rsa` and `wallet.key` tell an attacker where to aim.
+          .filter((name) => !policy.isBlocked(path.join(guarded.path.absolute, name)));
         const limit = input.limit ?? 100;
 
         const entries = await Promise.all(
@@ -197,7 +203,7 @@ export function createSearchTool(
         // is cheaper than an abort check per entry.
         if (depth > maxDepth || ctx.signal.aborted) return;
 
-        let entries: Awaited<ReturnType<typeof fs.readdir>>;
+        let entries: Dirent[];
         try {
           entries = await fs.readdir(directory, { withFileTypes: true });
         } catch {
@@ -216,6 +222,13 @@ export function createSearchTool(
             continue;
           }
           if (!entry.isFile()) continue;
+
+          // Every file is checked individually, not just the directory it is in.
+          // A deny pattern is usually written against the file — `**/.ssh/**`
+          // and `**/*.key` both match contents while matching no directory — so
+          // pruning the walk alone leaves the files themselves reachable. Found
+          // by a test that expected an empty result and got an SSH private key.
+          if (policy.isBlocked(full)) continue;
 
           scanned++;
           if (extension && !entry.name.toLowerCase().endsWith(extension)) continue;
@@ -699,7 +712,7 @@ async function countContents(target: string): Promise<{ files: number; bytes: nu
 
   const walk = async (directory: string, depth: number): Promise<void> => {
     if (depth > 12) return;
-    let entries: Awaited<ReturnType<typeof fs.readdir>>;
+    let entries: Dirent[];
     try {
       entries = await fs.readdir(directory, { withFileTypes: true });
     } catch {

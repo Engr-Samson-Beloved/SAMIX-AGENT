@@ -6,8 +6,72 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Phase 3: the LLM engine. The agent now plans with Google Gemini and answers in
-its own words; the deterministic Phase 1 planner remains as the no-key fallback.
+Phases 3, 4 and 5: the agent plans with Google Gemini, and now acts on the
+machine — files, applications and the browser. 2 tools became 17.
+
+### Added — Phases 4 and 5
+
+**Filesystem (9 tools)**
+
+- `listDirectory`, `search`, `readTextFile`, `getMetadata`, `createDirectory`,
+  `copy`, `move`, `rename`, `delete`.
+- One shared `guardPath()` every tool calls, so "the path was checked" is a
+  property of one function rather than of nine authors remembering.
+- Path shorthands (`desktop`, `downloads`, `documents`, …) plus `~` and
+  `%VAR%` expansion, so the planner looks a path up instead of inventing one.
+- The first verifiers that re-observe real state: a copy is confirmed by
+  stat-ing the destination and comparing its size to the source; a move checks
+  both that the file arrived *and* that it left, because the half-state is the
+  dangerous one.
+- `delete` is `destructive` + `irreversible`, names the exact path in its
+  confirmation prompt, and states that it does not use the Recycle Bin.
+
+**Applications and processes (4 tools)**
+
+- `app.list`, `app.launch`, `app.close`, `process.list`.
+- Application discovery: a curated table probed at documented install
+  locations, plus a depth-limited scan of the install roots filtered by
+  a "is this the program's main binary?" heuristic.
+- `app.launch` takes a **name**, never a path, resolved against discovery — an
+  arbitrary-executable primitive would be exactly the escape hatch spec §40
+  forbids. `NEVER_LAUNCHABLE` additionally refuses shells, interpreters and
+  living-off-the-land binaries (`certutil`, `regsvr32`, `rundll32`) even when
+  discovery finds them.
+- `app.close` uses `taskkill` **without** `/F`: an application with unsaved work
+  shows its save prompt and stays open, and the verifier reports that honestly
+  rather than the agent forcing it.
+- The only two native binaries the agent invokes are `tasklist` and `taskkill`,
+  resolved to absolute `System32` paths (never via `PATH`), with `shell: false`
+  and a strict pattern on the one caller-influenced argument.
+
+**Browser (2 tools)**
+
+- `browser.openUrl` and `browser.search` open a page in the user's *real*
+  browser, with their real session — which Playwright, driving a separate
+  automation profile, cannot do.
+- `external` permission, so CONTROLLED mode confirms with the exact address
+  shown first.
+- `http`/`https` only. `file:` would bypass `PathPolicy` entirely; `javascript:`
+  and `data:` are script execution in the user's session.
+- Verification is deliberately `unverified`: the browser process is confirmed,
+  the page load is not, and claiming the stronger thing would violate
+  development rule 25.
+
+### Fixed — found by the tests written for this work
+
+- **`filesystem.search` returned blocked files.** `isBlocked` was checked on
+  directories only, but deny patterns are usually written against the file
+  (`**/.ssh/**`, `**/*.key`) and match no directory — so pruning the walk left
+  the files themselves reachable. A test expecting an empty result got an SSH
+  private key. Both `search` and `listDirectory` now check every entry.
+- `AppRegistry.suggestions()` returned each application twice.
+- The Program Files scan listed `ffmpeg`, `git-receive-pack` and
+  `gpgme-w32spawn` as openable applications, burying Chrome.
+
+### Added — Phase 3: the LLM engine
+
+The agent plans with Google Gemini and answers in its own words; the
+deterministic Phase 1 planner remains as the no-key fallback.
 
 ### Added
 

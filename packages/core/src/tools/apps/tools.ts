@@ -8,7 +8,7 @@ import {
   type ToolResult,
   type Verification,
 } from '@samix/shared';
-import { AppRegistry, type DiscoveredApp } from './app-registry.js';
+import type { AppRegistry, DiscoveredApp } from './app-registry.js';
 import { closeProcess, isProcessRunning, listProcesses } from '../windows/processes.js';
 
 /**
