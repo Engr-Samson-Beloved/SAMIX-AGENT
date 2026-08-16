@@ -154,8 +154,10 @@ Stated plainly, because the agent will tell you the same thing if you ask it to:
 - **Reading web pages, clicking, filling forms.** Phase 6.
 - **Clicking things on screen, keyboard/mouse control, screenshots.** Phase 7.
 - **WhatsApp or any messaging.** Phase 8.
-- **Remembering anything between instructions.** Phase 9 — each instruction is
-  planned in isolation, so "now do the same for the other one" will not work.
+- **Remembering across restarts.** The agent follows the last six exchanges, so
+  "yes, do that", "close it" and "the other one" work within a session. Nothing
+  survives a restart, and it is dialogue memory rather than a record of machine
+  state — Phase 9.
 - **Running commands or scripts.** Phase 10, and deliberately gated: there is no
   shell tool, and `app.launch` refuses `cmd`, `powershell`, `wscript`,
   `certutil` and similar outright.
