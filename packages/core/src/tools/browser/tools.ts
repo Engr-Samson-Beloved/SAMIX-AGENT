@@ -400,8 +400,12 @@ export function createBrowserSearchTool(session: BrowserSession): AgentTool<Sear
         // interstitial or a changed layout both land here.
         return verification(
           'unverified',
-          `The ${result.data.engine} results page loaded, but no results could be read from it — ` +
-            `it may be showing a consent or verification page. The user can see it on screen.`,
+          // Phrased with an explicit "could not", which is also the vocabulary
+          // `Agent.hedge()` looks for. A verifier that states its own
+          // uncertainty plainly does not get a second, redundant caveat bolted
+          // on by the safety net — and the sentence reads better for it.
+          `The ${result.data.engine} results page loaded, but I could not read any results from ` +
+            `it — it may be showing a consent or verification page. The user can see it on screen.`,
         );
       }
       return verification(

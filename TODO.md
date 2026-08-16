@@ -99,8 +99,13 @@ unticked items are refinements, not blockers.
 - [ ] Context window management and summarisation (spec §62). Today the planner
       refuses a request over the character-estimated budget rather than
       compacting history; that is honest but not yet useful for long tasks.
-- [ ] Multi-turn conversation memory: each instruction is planned in isolation,
-      so "and now do the same for the other one" cannot work.
+- [x] ~~Multi-turn conversation memory.~~ The planner sees the last six
+      exchanges, plus `AgentContext`: the structured tool call behind any offer
+      it made, and what "it"/"that"/"this window" last pointed at. "Yes, do that
+      then" now runs the offered call without re-planning it.
+- [ ] The conversation window is a fixed six turns and the referents are a fixed
+      four fields. Both are deliberate floors rather than designs; revisit
+      against real transcripts once Phase 9 persists them.
 - [ ] Read the API key from the secret store, never from config or `.env` in a
       packaged build. `DevEnvSecretStore` seeds from `GEMINI_API_KEY` and
       refuses to activate when `NODE_ENV=production`, so this is currently
@@ -152,8 +157,9 @@ Downloads folder?" is answered from a real search.
 - [x] ~~No arbitrary-executable primitive.~~ `app.launch` takes a *name*
       resolved against discovery, never a path, and `NEVER_LAUNCHABLE` refuses
       shells, interpreters and living-off-the-land binaries even when found.
-- [ ] `process.find`, `focus` and window management. Focus needs UI Automation
-      (Phase 7); there is no way to raise a window from Node alone.
+- [x] ~~Window focus.~~ Shipped as `window.focus` in Phase 7 below.
+- [ ] `process.find`. `process.list` with a filter covers most of it; a dedicated
+      tool would let the planner ask about one process without reading them all.
 - [ ] Discovery misses apps whose binary is not named after its folder — the
       heuristic errs towards omitting rather than listing noise. Reading the
       `App Paths` registry key would close most of the gap.
@@ -162,21 +168,65 @@ Downloads folder?" is answered from a real search.
 
 ## Phase 6 — Browser
 
-- [x] ~~Opening pages and searches in the user's real browser.~~
-      `browser.openUrl` and `browser.search`, `external` permission so they
-      confirm first, restricted to `http`/`https` — `file:`, `javascript:` and
-      `data:` are refused, since the first would bypass `PathPolicy` entirely
-      and the others are script execution.
-- [ ] **Playwright, DOM-first (spec §19).** Still the whole of real browser
-      automation: reading a page, clicking, filling forms. Note the tools above
-      deliberately drive the user's *own* browser with their own session, which
-      Playwright cannot do; these are complements, not a first draft of it.
+**Status: DOM-first automation is done and verified against a live Chrome.**
+`pnpm dev:browser` drives every tool end to end on the real machine.
+
+- [x] ~~Playwright, DOM-first (spec §19).~~ `browser.{goto,search,scroll,click,
+      extractText,screenshot,close}` over `chromium.connectOverCDP`, sharing one
+      page handle. Every action re-reads `page.url()` and `page.title()` after
+      the load settles, so verification observes the world instead of assuming.
+- [x] ~~Keep the user's real session.~~ Attaches to a real Chrome rather than
+      launching an automation profile: an already-listening debug port first,
+      then their real profile, then a persistent SAMIX profile. The fallback is
+      reported to the user, never hidden.
+- [x] ~~Reclassify browsing as READ (spec §31).~~ Fetching and observing is
+      retrieval, not transmission; only `click` still confirms.
+- [x] ~~`http`/`https` only.~~ Boundary carried over unchanged in `parseWebUrl`.
+- [ ] **Typing into a page.** `browser.type`, `select`, `press` (spec §19) — the
+      subsystem can read and click but cannot fill in a form. These are the
+      tools that will need `external` permission, since a form submission does
+      transmit the user's data.
 - [ ] Download handling into the filesystem pipeline (spec §60).
+- [ ] `browser.find` and `browser.upload` from the spec's §19 list.
+- [ ] `browser.back`, `forward`, `refresh` — trivial, simply not yet needed.
+- [ ] **Consent walls are read through, not dismissed.** In Europe Google renders
+      results behind a cookie overlay; the agent reads the DOM underneath, so its
+      answer is correct while the user's screen shows a consent prompt. The
+      answer and the screen disagree, which is worth resolving — probably by
+      reporting the overlay rather than by clicking it, since clicking consent on
+      the user's behalf is their decision.
+- [ ] **Sessions are not multiplexed.** One page handle, so a plan cannot work
+      across two tabs. Fine today; a real limit for anything comparative.
 
 ## Phase 7 — Windows UI automation
 
-- [ ] UI Automation tree inspection; prefer controls over coordinates (§15).
-- [ ] `screen.capture`, `mouse.*`, `keyboard.*` with strict action limits (§16).
+**Status: windows are covered; the controls inside them are not.**
+
+- [x] ~~`window.{list,focus,close}` and `screen.getActiveWindow`~~ via `user32`
+      P/Invoke through a constant PowerShell script (spec §15).
+- [x] ~~"This window" resolves to the user's active window, never the agent's
+      own~~ (spec §13). Walks the process ancestry, stopping before the session
+      host so File Explorer is never mistaken for ours.
+- [ ] **A window query costs several seconds.** Measured: ~3.4s PowerShell 5.1
+      startup, ~1.7s `Add-Type` compiling the C#, and the process query on top.
+      The ancestry result is now cached, which removes ~1s from every call after
+      the first, but the startup floor remains. The fix is a **long-lived
+      PowerShell host** fed over stdin, with its own lifecycle, framing and
+      failure modes — a subsystem, not a tweak, and deliberately not smuggled
+      into `ui-automation.ts`.
+      *Done when:* a second `window.list` in the same session returns in <500ms.
+- [ ] **`isOwn` cannot see through ConPTY.** Launch the agent from a terminal
+      that hosts the shell over ConPTY and the terminal window is in a different
+      process tree, so it is indistinguishable from any other application.
+      Development-only — a packaged build spawns the sidecar from the Tauri host,
+      which *is* the parent. Documented on `WindowInfo.isOwn`; the obvious
+      workarounds (matching window titles, or `WindowsTerminal.exe`) would make
+      the agent refuse to act on windows that really are the user's.
+- [ ] UI Automation **tree** inspection — controls, buttons, text fields inside a
+      window; prefer controls over coordinates (§15). Windows are the container;
+      this is the contents, and it is what WhatsApp automation will need.
+- [ ] `screen.capture` of the desktop (the browser can capture a page already),
+      `mouse.*`, `keyboard.*` with strict action limits (§16).
 - [ ] Emergency stop must release synthetic input — hook is reserved in
       `Agent.emergencyStop()`.
 
@@ -214,6 +264,19 @@ Downloads folder?" is answered from a real search.
 ## Engineering debt to watch
 
 - [ ] `Agent.summarise()` will need rework once plans exceed a handful of steps.
+      It now reports verifier observations for up to three steps and falls back
+      to a count beyond that, which is a threshold picked by eye.
+- [ ] `hedge()` decides whether an unverified sentence already admits doubt with
+      a regex over free text. It cannot produce an overclaim — the failure modes
+      are a doubled hedge or none added to a sentence that had one — but a
+      structured `Verification` field (`observed` / `unconfirmed`) would remove
+      the guesswork entirely.
+- [ ] `classifyResponse()` is an English word list. It will not recognise
+      agreement in any other language, and will silently fall through to the
+      planner — which is the safe direction, but it is not multilingual.
+- [ ] The PowerShell script in `ui-automation.ts` is a template literal, so a
+      backtick silently truncates it. TypeScript catches it today because the
+      result does not compile; that is luck rather than design.
 - [ ] `EventBus` is synchronous; if a handler ever does real work it will need a
       queue. Keep handlers trivial until then.
 - [ ] Log rotation is size-based only; consider age-based retention.

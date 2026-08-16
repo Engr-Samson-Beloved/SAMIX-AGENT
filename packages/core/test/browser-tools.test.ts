@@ -185,7 +185,10 @@ describe('search', () => {
     assert.equal(result.success, true);
     assert.deepEqual(result.data?.results, []);
     assert.equal(verified.status, 'unverified');
-    assert.match(verified.detail, /consent|no results could be read/i);
+    assert.match(verified.detail, /consent/i);
+    // Stated in the vocabulary `Agent.hedge()` recognises, so the summary does
+    // not end up carrying two caveats for the same doubt.
+    assert.match(verified.detail, /could not/i);
   });
 
   test('reads result titles and links back, deduplicated by destination', async () => {

@@ -6,8 +6,85 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Phases 3, 4 and 5: the agent plans with Google Gemini, and now acts on the
-machine — files, applications and the browser. 2 tools became 17.
+Phases 3 through 7: the agent plans with Google Gemini, acts on the machine, and
+can now **read the web and the desktop back**. 2 tools became 26.
+
+### Added — Phase 6: real browser automation
+
+- **Playwright over the DevTools protocol** replaces the previous
+  `spawn chrome.exe <url>`. `browser.goto`, `search`, `scroll`, `click`,
+  `extractText`, `screenshot`, `close` — seven tools driving one shared page.
+- **Verification is now real.** Every action re-reads `page.url()` and
+  `page.title()` after `waitForLoadState` settles, so "Done" means the page is
+  actually there and a redirect to a login wall is reported rather than hidden.
+  The old implementation had no page handle at all, so *every* browser step
+  ended `unverified` — honest, but only because nothing could be checked.
+- `browser.search` **returns the results** — titles, links and the site each came
+  from — instead of only putting them on screen. Google's click-tracking
+  redirects are unwrapped where they are decodable, and where they are not
+  (the opaque `/goto?url=<blob>` form) the visible site name is read from the
+  page, so the planner can still tell official documentation from a content farm.
+- Attaches to the user's real Chrome rather than launching a throwaway profile,
+  in three ordered attempts: an already-listening debug port, their real profile,
+  then a persistent SAMIX profile. Chrome refuses remote control on its default
+  profile, so the fallback is sometimes unavoidable — and it is *reported*, not
+  hidden, because a user who is unexpectedly signed out deserves to know why.
+- Releasing the browser never closes the user's windows or tabs.
+
+### Added — Phase 7 (partial): windows on the desktop
+
+- `window.list`, `window.focus`, `window.close`, `screen.getActiveWindow`, via
+  `user32.dll` P/Invoke through a constant PowerShell script. Parameters travel
+  in environment variables and are validated integers, so no caller can
+  influence a character of what runs.
+- **"This window" never means the agent's own.** The agent's window is very often
+  the foreground window when an instruction arrives — the user just typed into
+  it — so a naive `GetForegroundWindow` would make "close this window" close the
+  agent. Resolution walks the process ancestry (stopping before the session
+  host, so File Explorer is never mistaken for ours) and falls back to the
+  window behind, saying that is what it did.
+- Ambiguity is resolved by risk: `window.focus` takes the frontmost match
+  because focusing is reversible; `window.close` refuses and returns the
+  candidates, because closing is not.
+
+### Added — following up on what the agent offered (spec §80)
+
+- When the agent offers an action it did not take, the **structured tool call**
+  is stored, not just the sentence. "Yes", "go ahead" and "do that then" now run
+  exactly what was offered, without re-planning — previously they produced a
+  request to clarify a suggestion the agent itself had made.
+- The yes/no test is deterministic and deliberately narrow: every word must be
+  an affirmative or a filler, so "yes, but use Firefox" reaches the planner
+  instead of running the stored call. Offers are consumed on use and expire.
+- `AgentContext` also tracks what "it", "that" and "this window" point at — the
+  last application, window, page and path the agent actually observed.
+
+### Changed — confirmation is spent where it changes an outcome (spec §31)
+
+- Browsing was reclassified from `external` to `read`. Spec §31 gives EXTERNAL
+  as sending a message, an email, an upload, a post — the common thread is
+  transmitting the user's data. Fetching and reading a page is retrieval, and
+  §31 lists reads under READ.
+- The practical argument is the stronger one: a prompt before every harmless
+  action is a prompt nobody reads. Training the user to approve reflexively is
+  not a safety measure but the destruction of one, because the prompt that
+  matters arrives looking like the forty already waved through.
+- `browser.click` stays behind a confirmation (`write` / `unknown`
+  reversibility): nothing in its arguments distinguishes "Next page" from
+  "Place order".
+
+### Changed — three verification outcomes, three tones
+
+- `verified` now leads with the **observation** rather than the step description
+  — "Done. The page is showing "GitHub" at https://github.com", not "Done. Open
+  a web page." The observation is the answer; the step is only the mechanism.
+- `not-applicable` (a pure read, whose result *is* the observation) is reported
+  plainly, with no confirmation language and no hedge.
+- `unverified` states what was seen and then what was not, and can no longer be
+  rounded up to "Done" — guaranteed structurally by `hedge()` rather than by
+  each verifier remembering to phrase it.
+- The honesty guarantee is unchanged and still structural: when any step is
+  unverified the language model is never invited to write the summary.
 
 ### Added — Phases 4 and 5
 
@@ -44,18 +121,14 @@ machine — files, applications and the browser. 2 tools became 17.
   resolved to absolute `System32` paths (never via `PATH`), with `shell: false`
   and a strict pattern on the one caller-influenced argument.
 
-**Browser (2 tools)**
+**Browser (2 tools)** — superseded by the Playwright subsystem above.
 
-- `browser.openUrl` and `browser.search` open a page in the user's *real*
-  browser, with their real session — which Playwright, driving a separate
-  automation profile, cannot do.
-- `external` permission, so CONTROLLED mode confirms with the exact address
-  shown first.
+- `browser.openUrl` and `browser.search` opened a page by handing a URL to
+  `chrome.exe`. Kept the user's real session, but produced no page handle, so
+  nothing could be read, scrolled or confirmed.
 - `http`/`https` only. `file:` would bypass `PathPolicy` entirely; `javascript:`
-  and `data:` are script execution in the user's session.
-- Verification is deliberately `unverified`: the browser process is confirmed,
-  the page load is not, and claiming the stronger thing would violate
-  development rule 25.
+  and `data:` are script execution in the user's session. **This boundary
+  survives unchanged** in `parseWebUrl`.
 
 ### Fixed — found by the tests written for this work
 
@@ -67,6 +140,30 @@ machine — files, applications and the browser. 2 tools became 17.
 - `AppRegistry.suggestions()` returned each application twice.
 - The Program Files scan listed `ffmpeg`, `git-receive-pack` and
   `gpgme-w32spawn` as openable applications, burying Chrome.
+
+### Fixed — found by running the Phase 6/7 work against the real machine
+
+- **`browser.search` read the results page before the results arrived.** Search
+  engines redirect once before serving results, and both `domcontentloaded` and
+  `load` fire on the intermediate document. Every search returned zero results
+  against a live Google. Now waits for the result selector, in the `attached`
+  state rather than `visible` — in Europe the results render behind a cookie
+  consent overlay, and waiting for visibility would time out on a page that has
+  the answer on it.
+- **A tracking redirect could be turned into a plausible URL for a site that
+  does not exist.** `parseWebUrl` reads a bare word as a hostname, which is
+  right for something a person typed; applied to Google's opaque
+  `?url=CAESaAHuR6pN…` parameter it produced `https://caesaahur6pn…/`.
+  Recovery now requires an already-absolute URL.
+- **The agent's own console was not recognised as its own.** The ancestry check
+  looked only at the parent process, but the window a user sees the agent
+  inside is several levels up (`node → shell → OpenConsole → Terminal`). Found
+  by `pnpm check:windows` against the real desktop, where the unit tests —
+  which use a fabricated desktop — could not see it. Now walks the full chain,
+  stopping before the session host so File Explorer is never claimed as ours.
+  The remaining ConPTY case is documented on `WindowInfo.isOwn` rather than
+  worked around, because the available workarounds would make the agent refuse
+  to act on windows that really are the user's.
 
 ### Added — Phase 3: the LLM engine
 

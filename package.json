@@ -29,6 +29,7 @@
     "dev:core": "pnpm --filter @samix/core dev",
     "dev:ui": "pnpm --filter @samix/desktop dev",
     "dev:browser": "pnpm build:packages && node scripts/check-browser.mjs",
+    "check:windows": "pnpm build:packages && node scripts/check-windows.mjs",
     "tauri": "pnpm --filter @samix/desktop tauri",
     "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke"
   },

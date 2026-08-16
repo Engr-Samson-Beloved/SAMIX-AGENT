@@ -4,13 +4,15 @@ A local-first autonomous computer agent for Windows. You speak or type an
 instruction; the agent plans it, executes real operations through explicit
 tools, **verifies that they actually happened**, and reports what it did.
 
-> **Status: Phases 1, 3, 4 and 5 complete; Phase 6 partially.** The runtime,
+> **Status: Phases 1, 3, 4, 5 and 6 complete; Phase 7 partially.** The runtime,
 > safety model and verification pipeline are built and tested (Phase 1); the
 > agent plans with Google Gemini (Phase 3); and it acts on the machine through
-> 17 tools — files, applications, processes, and opening web pages in your real
-> browser (Phases 4–6). Still missing: voice (Phase 2), reading web pages back
-> (Phase 6), screen control (Phase 7), messaging (Phase 8) and memory between
-> instructions (Phase 9). Start here: **[docs/USING-SAMIX.md](docs/USING-SAMIX.md)**.
+> 26 tools — files, applications, processes, a real browser it can *read* as
+> well as drive, and the windows on your desktop (Phases 4–7). Still missing:
+> voice (Phase 2), typing into pages and forms (Phase 6), controls inside
+> windows and mouse/keyboard (Phase 7), messaging (Phase 8) and memory that
+> survives a restart (Phase 9).
+> Start here: **[docs/USING-SAMIX.md](docs/USING-SAMIX.md)**.
 
 ---
 
@@ -143,7 +145,10 @@ pnpm repl
 | --- | --- |
 | `What OS and CPU is this computer running?` | `system.getInfo` → verified → *"…Windows 11 Home on an Intel Core i7-4800MQ."* |
 | `What are my 3 most recently modified files in Downloads?` | `filesystem.search` → answered from the real result |
-| `Open Chrome and search for the weather in Lagos` | confirms first, then opens it in your real browser |
+| `Search for the weather in Lagos` | opens it in your real browser **and reads the results back**, so it can answer |
+| `What does that page say?` | `browser.extractText` → answered from the page that is open |
+| `What window am I looking at?` | the window in front on *your* desktop — never the agent's own |
+| `Yes, do that then` | runs exactly what it offered last turn, without re-planning it |
 | `Delete the thing I mentioned earlier.` | asks which thing — it does **not** guess a file |
 
 Every call the model proposes is re-validated against the registry, the current
@@ -204,6 +209,15 @@ pnpm lint
 pnpm test          # builds packages, then runs the suite
 pnpm smoke         # drives the compiled core over real stdio
 pnpm verify        # all four
+```
+
+Two checks run against the real machine rather than against stubs, because the
+things they cover cannot be faked usefully — both caught defects the unit suite
+could not see:
+
+```powershell
+pnpm dev:browser     # drives a real Chrome through every browser tool
+pnpm check:windows   # read-only; enumerates your actual desktop
 ```
 
 Tests use Node's built-in runner (`node --test`) against the compiled output in
