@@ -54,6 +54,16 @@ try {
   const elapsed = Date.now() - started;
 
   check('window.list returns windows', windows.length > 0, `${windows.length} windows in ${elapsed}ms`);
+
+  // The first call pays for the ancestry query; later ones must not.
+  const secondStarted = Date.now();
+  await listWindows();
+  const secondElapsed = Date.now() - secondStarted;
+  check(
+    'a repeat query is cheaper than the first',
+    secondElapsed < elapsed,
+    `first ${elapsed}ms, second ${secondElapsed}ms`,
+  );
   check(
     'every window has a title and an owning process',
     windows.every((w) => w.title.length > 0 && w.processName.length > 0),

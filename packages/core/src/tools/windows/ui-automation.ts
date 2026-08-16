@@ -15,10 +15,18 @@ import { promisify } from 'node:util';
  * addon in a desktop installer is a per-Node-version build liability for
  * capabilities the OS already exposes to a signed, in-box interpreter.
  *
- * The cost is real and is not hidden: `Add-Type` compiles C# on every
- * invocation, so each call here takes roughly a second. That is why the tools
- * built on it are the *fallback* for window work and why `window.list` is not
- * called speculatively.
+ * The cost is real, measured, and not hidden. On the development machine:
+ *
+ *   ~3.4s  Windows PowerShell 5.1 process startup — the floor, and unavoidable
+ *          without a persistent host process
+ *   ~1.7s  `Add-Type` compiling the C# above, on every invocation
+ *   ~1.0s  `Get-CimInstance Win32_Process`, first call only (see `cachedOwnPids`)
+ *
+ * So a window query costs several seconds, which is why the tools built on it
+ * have generous timeouts, are the *fallback* for window work, and are never
+ * called speculatively. Making this fast needs a long-lived PowerShell host fed
+ * over stdin; that is a subsystem with its own lifecycle and failure modes, and
+ * it is recorded in TODO.md rather than smuggled in here.
  *
  * ## Why this is not the shell tool by the back door
  *
@@ -148,17 +156,15 @@ public static class SamixWin {
 }
 '@
 
-# One process query serves both jobs below: naming each window's owner, and
-# walking this agent's own ancestry. Asking per-pid was measurably the slowest
-# part of a window listing.
+# Names for every window's owning process, in one query.
+#
+# Get-Process rather than Get-CimInstance: measured on this machine the CIM
+# query costs about a second more, and per-pid lookups were slower still. The
+# richer CIM data is only needed for the ancestry walk, so it is loaded below
+# and only when that walk actually runs.
 $names = @{}
-$parents = @{}
-$born = @{}
-foreach ($p in Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate) {
-  $processId = [int] $p.ProcessId
-  $names[$processId] = ($p.Name -replace '\.exe$', '')
-  $parents[$processId] = [int] $p.ParentProcessId
-  $born[$processId] = $p.CreationDate
+foreach ($p in Get-Process -ErrorAction SilentlyContinue) {
+  $names[[int] $p.Id] = $p.ProcessName
 }
 
 function Get-ProcName([int] $processId) {
@@ -204,6 +210,20 @@ if ($consoleWindow -ne [IntPtr]::Zero) {
 # WindowsTerminal, and only the last of those owns a window. Miss it and
 # "close this window" closes the agent's own console.
 if ($env:SAMIX_UIA_SELF_PID) {
+  # The parent/creation data the walk needs. Loaded only here, because it is the
+  # expensive query and the walk runs once per session — the caller caches the
+  # answer and stops sending SAMIX_UIA_SELF_PID afterwards.
+  $parents = @{}
+  $born = @{}
+  foreach ($p in Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate) {
+    $processId = [int] $p.ProcessId
+    $parents[$processId] = [int] $p.ParentProcessId
+    $born[$processId] = $p.CreationDate
+    if (-not $names.ContainsKey($processId)) {
+      $names[$processId] = ($p.Name -replace '\.exe$', '')
+    }
+  }
+
   # $visited is separate from $excluded on purpose: the seed already contains
   # this process's own id, so reusing $excluded for cycle detection would end
   # the walk on its first iteration and quietly exclude nothing.
@@ -264,7 +284,8 @@ $action = $env:SAMIX_UIA_ACTION
 $target = [IntPtr]::Zero
 if ($env:SAMIX_UIA_HWND) { $target = [IntPtr][int64] $env:SAMIX_UIA_HWND }
 
-$payload = @{ action = $action }
+# Returned so the caller can cache it and skip the ancestry query next time.
+$payload = @{ action = $action; ownPids = @($excluded.Keys) }
 
 switch ($action) {
   'list' {
@@ -334,11 +355,23 @@ function seedOwnProcessIds(): number[] {
   return ids;
 }
 
+/**
+ * The agent's own process ids, resolved once per session.
+ *
+ * The ancestry walk needs `Get-CimInstance Win32_Process`, which measured about
+ * a second on its own — paid on every window query, for an answer that cannot
+ * change: a running process does not acquire a new ancestry. So the first call
+ * computes it, every later call is handed the result, and the expensive query
+ * never runs again.
+ */
+let cachedOwnPids: number[] | undefined;
+
 interface UiaPayload {
   readonly action?: string;
   readonly windows?: unknown;
   readonly active?: unknown;
   readonly window?: unknown;
+  readonly ownPids?: unknown[];
   readonly exists?: boolean;
   readonly focused?: boolean;
   readonly requested?: boolean;
@@ -370,8 +403,9 @@ async function runUia(
         env: {
           ...process.env,
           SAMIX_UIA_ACTION: action,
-          SAMIX_UIA_SELF_PID: String(process.pid),
-          SAMIX_UIA_EXCLUDE_PIDS: seedOwnProcessIds().join(','),
+          // Only ask for the ancestry walk while the answer is unknown.
+          ...(cachedOwnPids === undefined ? { SAMIX_UIA_SELF_PID: String(process.pid) } : {}),
+          SAMIX_UIA_EXCLUDE_PIDS: (cachedOwnPids ?? seedOwnProcessIds()).join(','),
           ...(options.handle === undefined ? {} : { SAMIX_UIA_HWND: String(options.handle) }),
         },
       },
@@ -383,11 +417,24 @@ async function runUia(
   const trimmed = stdout.trim();
   if (trimmed === '') throw new WindowQueryError('The window query returned nothing.');
 
+  let payload: UiaPayload;
   try {
-    return JSON.parse(trimmed) as UiaPayload;
+    payload = JSON.parse(trimmed) as UiaPayload;
   } catch {
     throw new WindowQueryError('The window query returned output that was not JSON.');
   }
+
+  if (cachedOwnPids === undefined && Array.isArray(payload.ownPids)) {
+    const ids = payload.ownPids.filter(
+      (id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0,
+    );
+    // Guard against caching a degenerate answer: if the walk found nothing at
+    // all, something went wrong and the seed is a better fallback than an empty
+    // set, which would mean nothing is ever recognised as the agent's own.
+    if (ids.length > 0) cachedOwnPids = ids;
+  }
+
+  return payload;
 }
 
 /** A window handle is a pointer-sized integer; reject anything that is not one. */
