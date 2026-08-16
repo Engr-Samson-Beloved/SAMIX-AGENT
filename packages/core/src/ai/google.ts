@@ -121,6 +121,65 @@ export const ASK_USER_DECLARATION = {
   },
 } as const;
 
+/**
+ * Control function for offering an action instead of taking it (spec §80).
+ *
+ * ## Why the model needs this at all
+ *
+ * Without it, "I could open that in Chrome for you" is prose, and prose is all
+ * the next turn inherits. When the user says "yes do that then", the agent has
+ * to reconstruct the offer from a sentence — and reconstruction can produce a
+ * *different* action from the one that was agreed to, which makes the agreement
+ * meaningless. Calling this instead records the exact tool invocation, so
+ * agreement replays it verbatim.
+ *
+ * ## Why `arguments` is a JSON string
+ *
+ * The arguments belong to whichever tool is being offered, so their shape is not
+ * known when this declaration is written. Gemini's schema dialect has no way to
+ * say "an object of unspecified shape" that survives translation, and inventing
+ * a union over every registered tool would make the declaration grow with the
+ * registry. A string is honest about the situation: the planner parses it and
+ * validates it against the real tool's Zod schema, which is the only
+ * authoritative check either way.
+ */
+export const PROPOSE_ACTION_FUNCTION = 'samix__propose_action';
+
+export const PROPOSE_ACTION_DECLARATION = {
+  name: PROPOSE_ACTION_FUNCTION,
+  description:
+    'Offer to do something without doing it, when the user has not actually asked for it yet — for ' +
+    'example after answering a question, when a follow-up action is the obvious next thing. Do NOT use ' +
+    'this for work the user has already asked for: call the tool directly instead. If the user later ' +
+    'agrees ("yes", "go ahead"), the offered call runs exactly as recorded here.',
+  parameters: {
+    type: 'object',
+    properties: {
+      offer: {
+        type: 'string',
+        description:
+          'What to say to the user, ending in the offer itself, e.g. "Chrome is not running. Shall I open it?"',
+      },
+      tool: {
+        type: 'string',
+        description: 'The exact name of the tool that would run if the user agrees.',
+      },
+      arguments: {
+        type: 'string',
+        description: 'The arguments for that tool, as a JSON object encoded in a string.',
+      },
+    },
+    required: ['offer', 'tool', 'arguments'],
+    propertyOrdering: ['offer', 'tool', 'arguments'],
+  },
+} as const;
+
+/** Every reserved control function. Never registered, never executed. */
+export const CONTROL_FUNCTIONS: ReadonlySet<string> = new Set([
+  ASK_USER_FUNCTION,
+  PROPOSE_ACTION_FUNCTION,
+]);
+
 /** Throws if a tool name cannot survive the round trip. Called at projection time. */
 export function assertEncodable(name: string): void {
   if (name.includes('_')) {
@@ -130,8 +189,8 @@ export function assertEncodable(name: string): void {
     );
   }
   const encoded = encodeToolName(name);
-  if (encoded === ASK_USER_FUNCTION) {
-    throw new Error(`Tool name "${name}" collides with the reserved control function.`);
+  if (CONTROL_FUNCTIONS.has(encoded)) {
+    throw new Error(`Tool name "${name}" collides with a reserved control function.`);
   }
   if (!/^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$/.test(encoded)) {
     throw new Error(`Tool name "${name}" is not a legal Gemini function name once encoded.`);
@@ -260,7 +319,11 @@ export class GoogleProvider implements LlmProvider {
     }
 
     if (declarations.length > 0 || request.tools.length > 0) {
-      body['tools'] = [{ functionDeclarations: [...declarations, ASK_USER_DECLARATION] }];
+      body['tools'] = [
+        {
+          functionDeclarations: [...declarations, ASK_USER_DECLARATION, PROPOSE_ACTION_DECLARATION],
+        },
+      ];
       // AUTO rather than ANY: the model must stay free to answer in prose, or
       // it can never say "that needs no tools" and would fabricate a call.
       body['toolConfig'] = { functionCallingConfig: { mode: 'AUTO' } };
@@ -353,7 +416,11 @@ export class GoogleProvider implements LlmProvider {
             // Gemini supplies no call id, so one is synthesised. It only has to
             // be unique within this response, which is what it correlates.
             id: `call_${index}`,
-            name: call['name'] === ASK_USER_FUNCTION ? ASK_USER_FUNCTION : decodeToolName(call['name']),
+            // Control functions are passed through unchanged; only real tool
+            // names carry the dot-to-underscore encoding that needs reversing.
+            name: CONTROL_FUNCTIONS.has(call['name'])
+              ? call['name']
+              : decodeToolName(call['name']),
             input: call['args'] ?? {},
           });
         }
@@ -400,7 +467,7 @@ function toContents(messages: readonly LlmMessage[]): unknown[] {
         for (const call of message.toolCalls ?? []) {
           parts.push({
             functionCall: {
-              name: call.name === ASK_USER_FUNCTION ? ASK_USER_FUNCTION : encodeToolName(call.name),
+              name: CONTROL_FUNCTIONS.has(call.name) ? call.name : encodeToolName(call.name),
               args: call.input ?? {},
             },
           });

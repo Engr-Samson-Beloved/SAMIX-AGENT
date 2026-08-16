@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import type { AgentMode, AppConfig } from '@samix/shared';
-import { ASK_USER_FUNCTION } from '../ai/google.js';
+import { ASK_USER_FUNCTION, CONTROL_FUNCTIONS, PROPOSE_ACTION_FUNCTION } from '../ai/google.js';
 import type { ModelRouter } from '../ai/model-router.js';
 import { LlmError, type LlmMessage, type LlmProvider, type LlmResponse, type LlmToolCall } from '../ai/types.js';
 import type { Logger } from '../observability/logger.js';
 import type { ToolRegistry } from '../tools/registry.js';
+import { describeReferents } from './context.js';
 import type {
   ConversationTurn,
   PlanRequest,
@@ -89,7 +90,7 @@ export class LlmPlanner implements Planner {
       ...toConversationMessages(request.history),
       { role: 'user', text: request.task.instruction },
     ];
-    const system = this.buildSystemPrompt(request.mode, 'plan');
+    const system = this.buildSystemPrompt(request.mode, 'plan', request.referents);
 
     const budget = this.checkContextBudget(system, messages, tools, config);
     if (budget) return budget;
@@ -142,7 +143,7 @@ export class LlmPlanner implements Planner {
       },
     ];
 
-    const system = this.buildSystemPrompt(request.mode, 'recover');
+    const system = this.buildSystemPrompt(request.mode, 'recover', request.referents);
     const budget = this.checkContextBudget(system, messages, tools, config);
     if (budget) {
       return { kind: 'give-up', reason: budget.kind === 'reply' ? budget.message : 'Context budget exceeded.' };
@@ -312,7 +313,23 @@ export class LlmPlanner implements Planner {
         return { kind: 'clarify', question: 'Could you rephrase that? I was not sure what you meant.' };
       }
 
-      const realCalls = response.toolCalls.filter((call) => call.name !== ASK_USER_FUNCTION);
+      // ---- the model wants to offer rather than act -------------------------
+      // Checked after `ask_user` — a model that is both unsure and full of ideas
+      // must resolve the ambiguity first — and before real calls, so an offer is
+      // never executed alongside the work it was only proposing.
+      const offer = response.toolCalls.find((call) => call.name === PROPOSE_ACTION_FUNCTION);
+      if (offer && phase === 'plan') {
+        const proposal = this.parseProposal(offer, request.mode);
+        if (proposal) return proposal;
+        // An unparseable offer is not worth a repair round-trip: the model was
+        // not going to act this turn anyway, so its prose is the honest outcome.
+        return {
+          kind: 'reply',
+          message: response.text.trim() || 'I have a suggestion, but I could not phrase it as an action.',
+        };
+      }
+
+      const realCalls = response.toolCalls.filter((call) => !CONTROL_FUNCTIONS.has(call.name));
 
       // ---- no tools: a direct answer ---------------------------------------
       if (realCalls.length === 0) {
@@ -375,6 +392,42 @@ export class LlmPlanner implements Planner {
   // Validation
   // -------------------------------------------------------------------------
 
+  /**
+   * Turn a `propose_action` call into a stored offer, or reject it.
+   *
+   * Held to exactly the same standard as a call the model wanted to run now:
+   * the tool must exist in this mode and the arguments must satisfy its real Zod
+   * schema. That is the point — the whole value of a stored proposal is that
+   * agreeing to it later skips re-planning, so it must be as trustworthy at
+   * storage time as an executed call is at execution time. A proposal validated
+   * loosely would be a way to smuggle an unvalidated call past the planner and
+   * into the next turn.
+   */
+  private parseProposal(call: LlmToolCall, mode: AgentMode): PlanResult | undefined {
+    const parsedArgs = ProposeArgs.safeParse(call.input);
+    if (!parsedArgs.success) return undefined;
+    const { offer, tool: toolName, arguments: rawArguments } = parsedArgs.data;
+
+    let input: unknown;
+    try {
+      input = rawArguments.trim() === '' ? {} : JSON.parse(rawArguments);
+    } catch {
+      this.deps.logger.warn('proposed action had unparseable arguments', { tool: toolName });
+      return undefined;
+    }
+
+    const validated = this.validateCalls([{ id: call.id, name: toolName, input }], mode);
+    if (validated.problems.length > 0 || !validated.steps[0]) {
+      this.deps.logger.warn('rejected a proposed action', {
+        tool: toolName,
+        problems: validated.problems,
+      });
+      return undefined;
+    }
+
+    return { kind: 'propose', message: offer, step: validated.steps[0] };
+  }
+
   private validateCalls(
     calls: readonly LlmToolCall[],
     mode: AgentMode,
@@ -420,9 +473,14 @@ export class LlmPlanner implements Planner {
   // Prompting
   // -------------------------------------------------------------------------
 
-  private buildSystemPrompt(mode: AgentMode, phase: 'plan' | 'recover'): string {
+  private buildSystemPrompt(
+    mode: AgentMode,
+    phase: 'plan' | 'recover',
+    referents: PlanRequest['referents'] = {},
+  ): string {
     const tools = this.deps.registry.describe(mode);
     const now = this.now();
+    const observed = describeReferents(referents);
 
     const catalogue = tools
       .map(
@@ -445,6 +503,13 @@ export class LlmPlanner implements Planner {
       `  local time: ${now.toISOString()}`,
       `  platform:   ${process.platform}`,
       `  agent mode: ${mode}`,
+      ...(observed
+        ? [
+            ``,
+            `What the user's words probably point at (observed during earlier steps, not guessed):`,
+            observed,
+          ]
+        : []),
       ``,
       `Tools available in this mode:`,
       catalogue || '  (none)',
@@ -467,13 +532,20 @@ export class LlmPlanner implements Planner {
       `   verification steps — verification is automatic and is not your responsibility.`,
       `6. If the request needs no tools at all, just answer it in plain text.`,
       `7. Earlier turns of this conversation are shown above, and they are yours. Resolve "it",`,
-      `   "that", "this one" and "do it then" against them instead of asking what the user means —`,
-      `   if you offered something last turn and they said yes, do the thing you offered. Only ask`,
-      `   when the history genuinely does not settle it. Note this is dialogue memory, not a record`,
-      `   of the machine's current state: re-check anything that may have changed since.`,
+      `   "that", "this one" and "do it then" against them and against the observed context above,`,
+      `   instead of asking what the user means. Only ask when neither settles it. Note the dialogue`,
+      `   is memory, not a record of the machine's current state: re-check anything that may have`,
+      `   changed since.`,
+      `8. "This window", "this app" and "the current window" mean whatever the user is looking at on`,
+      `   their own screen — never this agent's own window. Read the active window with a tool rather`,
+      `   than assuming.`,
+      `9. Use ${PROPOSE_ACTION_FUNCTION} when you want to suggest something the user has not asked for`,
+      `   yet, rather than describing the suggestion in prose. Prose offers are forgotten; a proposal`,
+      `   is remembered, so "yes, do that" next turn runs exactly what you offered. Never use it for`,
+      `   work already asked for — call the tool.`,
       ...(phase === 'recover'
         ? [
-            `8. A step has just failed. Read the error code and change your approach; repeating the`,
+            `10. A step has just failed. Read the error code and change your approach; repeating the`,
             `   identical call will fail identically. If nothing sensible remains, say so in plain`,
             `   text — that is a valid and useful answer, and better than a plan you do not believe in.`,
           ]
@@ -573,6 +645,13 @@ function toConversationMessages(history: readonly ConversationTurn[]): LlmMessag
 const AskUserArgs = z.object({
   question: z.string().min(1),
   options: z.array(z.string()).optional(),
+});
+
+const ProposeArgs = z.object({
+  offer: z.string().min(1),
+  tool: z.string().min(1),
+  /** JSON text; see PROPOSE_ACTION_DECLARATION for why it is not an object. */
+  arguments: z.string(),
 });
 
 /**

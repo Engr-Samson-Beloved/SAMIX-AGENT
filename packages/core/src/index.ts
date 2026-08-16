@@ -8,6 +8,10 @@ export { Agent } from './agent/agent.js';
 export type { AgentDeps, SubsystemStatus } from './agent/agent.js';
 export { CancellationToken, delay, withTimeout } from './agent/cancellation.js';
 export type { CancelReason } from './agent/cancellation.js';
+export { classifyResponse } from './agent/affirmative.js';
+export type { Response } from './agent/affirmative.js';
+export { AgentContext, describeReferents, PROPOSAL_TTL_MS } from './agent/context.js';
+export type { PendingProposal, Referents } from './agent/context.js';
 export { StepExecutor } from './agent/executor.js';
 export type { ConfirmationGate, ExecuteStepContext, ExecutorDeps, StepOutcome } from './agent/executor.js';
 export { HybridPlanner } from './agent/hybrid-planner.js';
@@ -26,6 +30,9 @@ export type {
 export {
   ASK_USER_DECLARATION,
   ASK_USER_FUNCTION,
+  CONTROL_FUNCTIONS,
+  PROPOSE_ACTION_DECLARATION,
+  PROPOSE_ACTION_FUNCTION,
   GoogleProvider,
   LlmError,
   ModelRouter,
@@ -114,7 +121,6 @@ export {
   createAppListTool,
   processListTool,
 } from './tools/apps/tools.js';
-export { createBrowserOpenUrlTool, createBrowserSearchTool } from './tools/apps/browser.js';
 export {
   closeProcess,
   isProcessRunning,
@@ -123,6 +129,37 @@ export {
   waitForProcessToExit,
 } from './tools/windows/processes.js';
 export type { RunningProcess } from './tools/windows/processes.js';
+
+// Phase 6 — browser automation over the DevTools protocol
+export { BrowserSession, BrowserSessionError, DEFAULT_DEBUG_PORT } from './tools/browser/session.js';
+export type { ProfileKind, SessionStatus } from './tools/browser/session.js';
+export {
+  createBrowserClickTool,
+  createBrowserCloseTool,
+  createBrowserExtractTextTool,
+  createBrowserGotoTool,
+  createBrowserScreenshotTool,
+  createBrowserScrollTool,
+  createBrowserSearchTool,
+  parseWebUrl,
+} from './tools/browser/tools.js';
+
+// Phase 7 (partial) — windows on the user's desktop
+export {
+  getActiveWindow,
+  isValidHandle,
+  listWindows,
+  WindowQueryError,
+} from './tools/windows/ui-automation.js';
+export type { WindowInfo } from './tools/windows/ui-automation.js';
+export {
+  createScreenGetActiveWindowTool,
+  createWindowCloseTool,
+  createWindowFocusTool,
+  createWindowListTool,
+  windowsAutomation,
+} from './tools/windows/tools.js';
+export type { ReferentSource, WindowAutomation, WindowReferents } from './tools/windows/tools.js';
 
 export { RpcRouter } from './rpc/router.js';
 export type { RouterResult } from './rpc/router.js';

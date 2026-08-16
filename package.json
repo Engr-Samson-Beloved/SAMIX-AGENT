@@ -28,7 +28,7 @@
     "icons": "node scripts/generate-icons.mjs",
     "dev:core": "pnpm --filter @samix/core dev",
     "dev:ui": "pnpm --filter @samix/desktop dev",
-    "dev:browser": "node scripts/dev-browser.mjs",
+    "dev:browser": "pnpm build:packages && node scripts/check-browser.mjs",
     "tauri": "pnpm --filter @samix/desktop tauri",
     "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke"
   },

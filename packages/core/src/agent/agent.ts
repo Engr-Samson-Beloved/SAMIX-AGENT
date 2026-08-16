@@ -16,9 +16,11 @@ import { publish } from '../events/event-bus.js';
 import type { Logger } from '../observability/logger.js';
 import type { PermissionEngine } from '../security/permissions.js';
 import type { ToolRegistry } from '../tools/registry.js';
+import { classifyResponse } from './affirmative.js';
 import { CancellationToken } from './cancellation.js';
+import { AgentContext } from './context.js';
 import { type StepExecutor } from './executor.js';
-import { toTaskSteps, type ConversationTurn, type Planner } from './planner.js';
+import { toTaskSteps, type ConversationTurn, type PlanResult, type Planner } from './planner.js';
 import { AgentStateMachine } from './state-machine.js';
 import { type TaskManager } from './task-manager.js';
 
@@ -60,6 +62,11 @@ export interface AgentDeps {
   readonly tasks: TaskManager;
   readonly logger: Logger;
   readonly version: string;
+  /**
+   * Conversational memory that spans tasks (spec §80). Optional so existing
+   * callers and tests keep working; one is created if none is supplied.
+   */
+  readonly context?: AgentContext;
 }
 
 export interface SubsystemStatus {
@@ -83,9 +90,11 @@ export class Agent {
   private stopped = false;
 
   private readonly log: Logger;
+  private readonly context: AgentContext;
 
   constructor(private readonly deps: AgentDeps) {
     this.log = deps.logger.child('agent');
+    this.context = deps.context ?? new AgentContext();
 
     this.machine.onTransition((from, to) => {
       publish(this.deps.bus, { type: 'agent.state.changed', from, to });
@@ -202,15 +211,24 @@ export class Agent {
 
       // ---- plan ---------------------------------------------------------
       this.machine.transition('planning');
-      const plan = await this.deps.planner.plan({
-        task: this.requireTask(),
-        mode: this.mode,
-        availableTools: this.deps.registry.availableIn(this.mode).map((t) => t.name),
-        history: this.conversation(),
-        signal: this.token.signal,
-      });
+      const plan = await this.decide();
 
       if (plan.kind === 'reply') {
+        this.complete(plan.message);
+        return;
+      }
+      if (plan.kind === 'propose') {
+        // Said, not done. The structured call is kept so that "yes, do that" on
+        // the next turn runs exactly this, rather than something re-derived from
+        // the sentence the user was shown.
+        this.context.propose({
+          tool: plan.step.tool,
+          input: plan.step.input,
+          offer: plan.message,
+          description: plan.step.description,
+          taskId,
+        });
+        this.log.info('offered an action without running it', { tool: plan.step.tool });
         this.complete(plan.message);
         return;
       }
@@ -280,6 +298,58 @@ export class Agent {
     }
   }
 
+  /**
+   * Decide what this instruction means: an answer to a standing offer, or new
+   * work for the planner (spec §80).
+   *
+   * The order is the design. A bare "yes do that then" carries no content the
+   * planner could act on — re-planning it produces, at best, a guess and, as
+   * observed, a request to clarify a suggestion the agent itself made a moment
+   * earlier. So agreement is resolved against the stored proposal *first*, and
+   * the model is never consulted about whether it meant what it said.
+   *
+   * Anything that is not a plain yes or no clears the offer before planning.
+   * A user who has moved on has withdrawn their attention from it, and an offer
+   * left lying around could be accepted several turns later by an unrelated
+   * "sure".
+   */
+  private async decide(): Promise<PlanResult> {
+    const task = this.requireTask();
+    const answer = classifyResponse(task.instruction);
+    const proposal = answer === 'other' ? undefined : this.context.pendingProposal;
+
+    if (proposal && answer === 'affirmative') {
+      // `take` rather than `read`: one offer, one answer. Leaving it in place
+      // would let the next stray "ok" run the same action a second time.
+      this.context.takeProposal();
+      this.log.info('resolved an affirmative against a standing offer', {
+        tool: proposal.tool,
+        offeredInTask: proposal.taskId,
+      });
+      return {
+        kind: 'steps',
+        steps: [{ description: proposal.description, tool: proposal.tool, input: proposal.input }],
+      };
+    }
+
+    if (proposal && answer === 'negative') {
+      this.context.clearProposal();
+      this.log.info('a standing offer was declined', { tool: proposal.tool });
+      return { kind: 'reply', message: 'All right — I have left it alone.' };
+    }
+
+    if (answer === 'other') this.context.clearProposal();
+
+    return this.deps.planner.plan({
+      task,
+      mode: this.mode,
+      availableTools: this.deps.registry.availableIn(this.mode).map((t) => t.name),
+      history: this.conversation(),
+      referents: this.context.referents,
+      signal: this.token.signal,
+    });
+  }
+
   /** Execute one step, applying the retry policy. Returns 'abort' to stop. */
   private async runStep(
     step: TaskStep,
@@ -307,7 +377,7 @@ export class Agent {
     if (this.machine.can('observing')) this.machine.transition('observing');
     if (this.machine.can('verifying')) this.machine.transition('verifying');
 
-    this.deps.tasks.updateStep(step.id, {
+    const updated = this.deps.tasks.updateStep(step.id, {
       status: outcome.status,
       result: outcome.result,
       finishedAt: new Date().toISOString(),
@@ -315,7 +385,15 @@ export class Agent {
       ...(outcome.verification ? { verification: outcome.verification } : {}),
       ...(outcome.result.error ? { error: outcome.result.error } : {}),
     });
-    publish(this.deps.bus, { type: 'task.updated', task: this.requireTask() });
+
+    // Learn what this step was about, so "it", "that" and "this window" have
+    // something concrete to point at next turn (spec §80). Driven from the
+    // finished step, because the interesting facts — the URL a redirect actually
+    // landed on, the window that was really focused — are in the result.
+    const finished = updated.steps.find((candidate) => candidate.id === step.id);
+    if (finished) this.context.observe(finished);
+
+    publish(this.deps.bus, { type: 'task.updated', task: updated });
 
     if (outcome.status === 'succeeded' || outcome.status === 'succeeded_unverified') {
       return 'continue';
@@ -347,6 +425,7 @@ export class Agent {
       mode: this.mode,
       availableTools: this.deps.registry.availableIn(this.mode).map((t) => t.name),
       history: this.conversation(),
+      referents: this.context.referents,
       signal: this.token.signal,
       failedStep: step,
       error,
@@ -361,8 +440,24 @@ export class Agent {
       this.fail(error, reason);
       return 'abort';
     }
-    if (recovery.kind === 'reply' || recovery.kind === 'clarify') {
-      this.complete(recovery.kind === 'reply' ? recovery.message : recovery.question);
+    if (recovery.kind === 'reply' || recovery.kind === 'clarify' || recovery.kind === 'propose') {
+      // A recovery that suggests rather than acts still ends this task. The
+      // offer is stored so the user can simply agree, which is the whole point
+      // of the mechanism — but the step that failed stays failed.
+      if (recovery.kind === 'propose') {
+        this.context.propose({
+          tool: recovery.step.tool,
+          input: recovery.step.input,
+          offer: recovery.message,
+          description: recovery.step.description,
+          taskId,
+        });
+      }
+      this.complete(
+        recovery.kind === 'clarify'
+          ? recovery.question
+          : recovery.message,
+      );
       return 'abort';
     }
 
@@ -573,9 +668,29 @@ export class Agent {
   /**
    * Build the sentence the user hears when no planner can write one.
    *
-   * Development rule 25 and spec §93 are the whole design of this method: it
-   * reports what was verified, and says so explicitly when something completed
-   * but could not be confirmed. It never rounds "probably worked" up to "done".
+   * ## Three outcomes, three tones
+   *
+   * Every step ends in one of three states, and each deserves different words.
+   * Collapsing them — the earlier version did, and it made ordinary successes
+   * read as malfunctions — is its own kind of dishonesty: a user who is told
+   * "I could not confirm it" about work that plainly happened learns to ignore
+   * the distinction entirely, which is the exact opposite of what development
+   * rule 25 is protecting.
+   *
+   *  - **verified** — something was re-observed. Lead with the observation:
+   *    "Done. The page is showing github.com — 'GitHub'." The observation is
+   *    the answer; the step description is only the mechanism.
+   *  - **not-applicable** — a pure read, whose returned value *is* the
+   *    observation, so there is nothing extra to confirm. Report the result
+   *    plainly, with no hedge and no confirmation language.
+   *  - **unverified** — it ran, and the check could not settle it. Say what was
+   *    seen and then what was not: "Opened it — could not confirm the page
+   *    rendered." Never "done", never a bare "I could not confirm it", which
+   *    withholds the part that is actually known.
+   *
+   * Failure keeps its own, plainly negative, phrasing. Order matters: failures
+   * and unverified work are checked before the single-step shortcut, so a
+   * one-step task can never take the confident path on unconfirmed work.
    */
   private summarise(): string {
     const { unverified, failed } = this.deps.tasks.outcome();
@@ -584,39 +699,36 @@ export class Agent {
       (s) => s.status === 'succeeded' || s.status === 'succeeded_unverified',
     ).length;
 
-    // Order matters: the failure and unverified cases are checked BEFORE the
-    // single-step shortcut. Reversing them would let a one-step task report a
-    // confident "Done." for work that was never confirmed, which is exactly the
-    // claim development rule 25 forbids.
     if (failed > 0) {
       return `I completed ${done} of ${task.steps.length} steps; ${failed} failed.`;
     }
+
     if (unverified > 0) {
-      // Say what the verifier *did* establish, not merely that it fell short.
-      // "I completed 1 step, but could not confirm it" is true and useless: the
-      // browser did open, and the detail already on the step says so. Withholding
-      // it reads as failure for work that largely succeeded, which is its own
-      // kind of dishonesty — development rule 25 forbids overclaiming, not
-      // reporting.
-      const findings = task.steps
-        .filter((s) => s.status === 'succeeded_unverified')
-        .map((s) => s.verification?.detail?.trim())
-        .filter((detail): detail is string => Boolean(detail))
-        // Details are written as free text by each verifier, so terminal
-        // punctuation cannot be assumed — without this they run together into
-        // one unreadable sentence.
-        .map((detail) => (/[.!?]$/.test(detail) ? detail : `${detail}.`));
+      const findings = observations(task.steps, 'succeeded_unverified');
 
-      const noun = unverified === 1 ? 'it' : `${unverified} of them`;
-      const observed = findings.length > 0 ? ` ${findings.join(' ')}` : '';
+      // One step, one finding: the verifier's own sentence is the whole report.
+      // It already says what happened and what could not be checked, and
+      // wrapping it in "I completed 1 step, but…" only buries that. `hedge`
+      // guarantees the uncertainty survives even if a verifier forgot to state
+      // it — the honesty rule cannot depend on every author remembering.
+      if (task.steps.length === 1 && findings.length === 1) return hedge(findings[0]!);
 
-      return `I completed ${done} step${done === 1 ? '' : 's'}, but could not confirm ${noun}.${observed}`;
+      const noun = unverified === 1 ? 'one of them' : `${unverified} of them`;
+      const detail = findings.length > 0 ? ` ${findings.join(' ')}` : '';
+      return `I completed ${done} step${done === 1 ? '' : 's'} but could not confirm ${noun}.${detail}`;
     }
 
-    // A single verified step: answer with its result rather than narrating.
-    if (task.steps.length === 1 && done === 1) {
-      return `Done. ${task.steps[0]!.description}.`;
+    // Nothing failed and nothing is unconfirmed. Answer with what was actually
+    // seen where a verifier saw something, and with the step itself where the
+    // tool was a pure read and there was nothing to see.
+    const seen = observations(task.steps, 'succeeded');
+
+    if (task.steps.length === 1) {
+      return seen.length === 1 ? `Done. ${seen[0]}` : `Done. ${task.steps[0]!.description}.`;
     }
+    // Beyond a few observations this stops being a summary and becomes a log,
+    // which the task timeline already is.
+    if (seen.length > 0 && seen.length <= 3) return `Done. ${seen.join(' ')}`;
     return `Done. I completed and verified all ${done} steps.`;
   }
 
@@ -656,4 +768,40 @@ export class Agent {
   private requireTaskOr(fallback: Task): Task {
     return this.deps.tasks.activeTask ?? fallback;
   }
+}
+
+/**
+ * Sentences that already admit the thing was not confirmed.
+ *
+ * Used to decide whether an unverified finding needs a caveat appended. It is a
+ * heuristic over free text and is allowed to be: a false positive leaves a
+ * sentence that already hedges, and a false negative appends a second hedge to
+ * one that did. Neither can produce an overclaim, which is the only outcome
+ * development rule 25 actually forbids.
+ */
+const ALREADY_HEDGED =
+  /\b(could ?n[o']?t|could not|cannot|can'?t|unable|not been|has not|have not|was not|were not|may not|might not|unverified|unconfirmed|no way to (tell|check|confirm))\b/i;
+
+/** Guarantee an unverified report says so, whatever the verifier wrote. */
+function hedge(detail: string): string {
+  return ALREADY_HEDGED.test(detail) ? detail : `${detail} I could not confirm it.`;
+}
+
+/**
+ * Collect what the verifiers actually observed, for steps in a given state.
+ *
+ * `not-applicable` details are deliberately excluded: they say "read-only tool:
+ * the returned value is itself the observation", which is a note to a developer
+ * about the verification model, not something a user asked to hear.
+ */
+function observations(steps: readonly TaskStep[], status: TaskStep['status']): string[] {
+  return steps
+    .filter((step) => step.status === status)
+    .filter((step) => step.verification?.status === 'verified' || status === 'succeeded_unverified')
+    .map((step) => step.verification?.detail?.trim())
+    .filter((detail): detail is string => Boolean(detail))
+    // Details are free text written by each verifier, so terminal punctuation
+    // cannot be assumed — without this they run together into one unreadable
+    // sentence.
+    .map((detail) => (/[.!?]$/.test(detail) ? detail : `${detail}.`));
 }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import {
   ASK_USER_FUNCTION,
+  PROPOSE_ACTION_FUNCTION,
   GoogleProvider,
   assertEncodable,
   decodeToolName,
@@ -160,7 +161,7 @@ describe('GoogleProvider request shape', () => {
     assert.match(calls[0]!.url, /models\/gemini-3\.6-flash:generateContent$/);
   });
 
-  test('always offers the ask-user control function alongside real tools', async () => {
+  test('always offers the control functions alongside real tools', async () => {
     const { fetchImpl, calls } = fakeFetch([{ body: textResponse('hi') }]);
     const provider = new GoogleProvider({ apiKey: 'k', fetchImpl });
 
@@ -168,7 +169,25 @@ describe('GoogleProvider request shape', () => {
 
     const tools = calls[0]!.body['tools'] as Array<{ functionDeclarations: Array<{ name: string }> }>;
     const names = tools[0]!.functionDeclarations.map((d) => d.name);
-    assert.deepEqual(names, ['system_getInfo', ASK_USER_FUNCTION]);
+
+    // Both control functions travel with every request. Without `ask_user` the
+    // model cannot say "I need to check"; without `propose_action` it cannot
+    // offer something without doing it, and the offer is lost to prose.
+    assert.deepEqual(names, ['system_getInfo', ASK_USER_FUNCTION, PROPOSE_ACTION_FUNCTION]);
+  });
+
+  test('does not decode underscores in a control function name', async () => {
+    // Real tool names encode `.` as `_`, so a naive decode would turn
+    // `samix__propose_action` into `samix..propose.action` and the planner would
+    // look for a tool by that name instead of recognising the control function.
+    const { fetchImpl } = fakeFetch([
+      { body: { candidates: [{ content: { parts: [{ functionCall: { name: PROPOSE_ACTION_FUNCTION, args: { offer: 'shall I?' } } }] }, finishReason: 'STOP' }] } },
+    ]);
+    const provider = new GoogleProvider({ apiKey: 'k', fetchImpl });
+
+    const response = await provider.generate(request());
+
+    assert.equal(response.toolCalls[0]?.name, PROPOSE_ACTION_FUNCTION);
   });
 
   test('encodes a tool result as a functionResponse turn', async () => {

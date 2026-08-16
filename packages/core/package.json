@@ -15,7 +15,9 @@
   "bin": {
     "samix-core": "./dist/main.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --emitDeclarationOnly",
@@ -25,6 +27,7 @@
   },
   "dependencies": {
     "@samix/shared": "workspace:*",
+    "playwright-core": "^1.62.1",
     "zod": "^4.1.13"
   },
   "devDependencies": {

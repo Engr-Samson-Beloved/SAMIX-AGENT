@@ -147,6 +147,136 @@ describe('the Phase 1 loop, end to end', () => {
     assert.equal(seen[1]?.[0]?.reply, 'noted');
   });
 
+  it('runs an offered action when the user simply agrees', async () => {
+    // The failure this fixes: the agent offers something, the user says "yes do
+    // that then", and the next turn — planning from prose — asks them to
+    // clarify a suggestion the agent itself made.
+    let plans = 0;
+    const rt = build({
+      planner: {
+        name: 'offering (test)',
+        plan: () => {
+          plans += 1;
+          return Promise.resolve<PlanResult>({
+            kind: 'propose',
+            message: 'That needs system details. Shall I read them?',
+            step: { description: 'read system information', tool: 'system.getInfo', input: {} },
+          });
+        },
+      },
+    });
+
+    const first = watch(rt);
+    rt.agent.start();
+    const offered = rt.agent.submit('is this machine any good?', 'text');
+    await first.done;
+
+    // Nothing ran: it was an offer, and the user was told what was on offer.
+    assert.equal(rt.tasks.find(offered.taskId)?.steps.length, 0);
+    assert.equal(rt.tasks.find(offered.taskId)?.summary, 'That needs system details. Shall I read them?');
+
+    const second = watch(rt);
+    const accepted = rt.agent.submit('yes do that then', 'text');
+    const outcome = await second.done;
+
+    assert.equal(outcome.type, 'task.completed');
+    const task = rt.tasks.find(accepted.taskId);
+    assert.equal(task?.steps[0]?.tool, 'system.getInfo');
+    assert.equal(task?.steps[0]?.status, 'succeeded');
+    // The planner is not consulted at all on the agreeing turn: the stored call
+    // runs verbatim, so what happens is exactly what was offered.
+    assert.equal(plans, 1, 'agreement must not be re-planned');
+  });
+
+  it('declines an offer without running it', async () => {
+    const rt = build({
+      planner: {
+        name: 'offering (test)',
+        plan: () =>
+          Promise.resolve<PlanResult>({
+            kind: 'propose',
+            message: 'Shall I read the system details?',
+            step: { description: 'read system information', tool: 'system.getInfo', input: {} },
+          }),
+      },
+    });
+
+    const first = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('is this machine any good?', 'text');
+    await first.done;
+
+    const second = watch(rt);
+    const declined = rt.agent.submit('no thanks', 'text');
+    await second.done;
+
+    assert.equal(rt.tasks.find(declined.taskId)?.steps.length, 0);
+    assert.match(rt.tasks.find(declined.taskId)?.summary ?? '', /left it alone/i);
+  });
+
+  it('does not treat a new instruction as agreement to an old offer', async () => {
+    const instructions: string[] = [];
+    const rt = build({
+      planner: {
+        name: 'offering (test)',
+        plan: (request) => {
+          instructions.push(request.task.instruction);
+          return Promise.resolve<PlanResult>(
+            instructions.length === 1
+              ? {
+                  kind: 'propose',
+                  message: 'Shall I open Notepad?',
+                  step: { description: 'open Notepad', tool: 'app.launch', input: { name: 'Notepad' } },
+                }
+              : { kind: 'reply', message: 'ok' },
+          );
+        },
+      },
+    });
+
+    const first = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('I need to write something down', 'text');
+    await first.done;
+
+    const second = watch(rt);
+    rt.agent.submit('actually open Chrome instead', 'text');
+    await second.done;
+
+    // The stored offer must not hijack an instruction that says something else.
+    // "actually open Chrome" reaching the planner is the whole requirement.
+    assert.deepEqual(instructions, ['I need to write something down', 'actually open Chrome instead']);
+  });
+
+  it('tells the planner what "it" currently points at', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const rt = build({
+      planner: {
+        name: 'recording (test)',
+        plan: (request) => {
+          seen.push(request.referents as Record<string, unknown>);
+          return Promise.resolve<PlanResult>(
+            seen.length === 1 ? planFor('system.getInfo') : { kind: 'reply', message: 'ok' },
+          );
+        },
+      },
+    });
+
+    const first = watch(rt);
+    rt.agent.start();
+    rt.agent.submit('read the system info', 'text');
+    await first.done;
+
+    const second = watch(rt);
+    rt.agent.submit('and what about the other thing', 'text');
+    await second.done;
+
+    assert.deepEqual(seen[0], {}, 'nothing is known before anything has run');
+    // `system.getInfo` names no application, page or file, so there is still
+    // nothing to point at — the referents are observations, never invented.
+    assert.deepEqual(seen[1], {});
+  });
+
   it('never includes the in-flight task in its own history', async () => {
     const seen: Array<readonly unknown[]> = [];
     const rt = build({
@@ -246,7 +376,14 @@ describe('the verification guarantee (spec §29, development rule 25)', () => {
     // The honesty guarantee is structural: an LLM is never given the chance to
     // phrase unverified work, so it cannot be talked into "everything worked".
     assert.equal(asked, false, 'the planner must not be asked to summarise unverified work');
-    assert.match(rt.tasks.find(taskId)?.summary ?? '', /could not confirm/i);
+
+    // Asserted as the invariant rather than as a fixed phrase: unverified work
+    // must never read as a confident success, and must carry the doubt. The
+    // exact wording comes from whichever verifier ran, so pinning it here would
+    // make every new verifier a test failure.
+    const summary = rt.tasks.find(taskId)?.summary ?? '';
+    assert.doesNotMatch(summary, /^Done\./, 'unverified work must not open with "Done."');
+    assert.match(summary, /could ?n[o']?t|cannot|unable|unverified/i);
   });
 
   it('uses a planner-written summary when every step verified', async () => {
@@ -304,11 +441,55 @@ describe('the verification guarantee (spec §29, development rule 25)', () => {
     await done;
     const task = rt.tasks.find(taskId);
     assert.equal(task?.steps[0]?.status, 'succeeded_unverified');
-    assert.match(
+    assert.doesNotMatch(
       task?.summary ?? '',
-      /could not confirm/i,
+      /^Done\./,
       'the summary must not claim an unverified step succeeded',
     );
+    assert.match(task?.summary ?? '', /could ?n[o']?t|cannot|unable|unverified/i);
+  });
+
+  it('reports a verified step with what was observed, not with the step description', async () => {
+    const observant: AgentTool<Record<string, never>, unknown> = {
+      name: 'demo.observable',
+      description: 'A tool whose verifier reports a concrete observation about the world.',
+      permission: 'write',
+      reversibility: 'reversible',
+      inputSchema: z.object({}),
+      verification: 'explicit',
+      execute: () => Promise.resolve(ok({ done: true })),
+      verify: () => Promise.resolve(verification('verified', 'The kettle is now switched on.')),
+    };
+
+    const rt = build({
+      planner: fixedPlanner(planFor('demo.observable', 'switch the kettle on')),
+      tools: [observant as unknown as AgentTool<never, unknown>],
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('put the kettle on', 'text');
+
+    await done;
+
+    // Verified work gets the confident tone AND the observation. "Done. Switch
+    // the kettle on." would describe the mechanism instead of the outcome.
+    assert.equal(rt.tasks.find(taskId)?.summary, 'Done. The kettle is now switched on.');
+  });
+
+  it('reports a read-only step plainly, with no confirmation language', async () => {
+    const rt = build({ planner: fixedPlanner(planFor('system.getInfo', 'read system information')) });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('what am I running', 'text');
+
+    await done;
+
+    // A pure read verifies as `not-applicable`: its return value IS the
+    // observation, so there is nothing to confirm and nothing to hedge. It must
+    // not borrow either the confident or the doubtful phrasing.
+    const summary = rt.tasks.find(taskId)?.summary ?? '';
+    assert.equal(summary, 'Done. read system information.');
+    assert.doesNotMatch(summary, /confirm|verif/i);
   });
 });
 

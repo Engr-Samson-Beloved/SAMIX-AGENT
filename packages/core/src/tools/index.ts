@@ -1,17 +1,31 @@
+import path from 'node:path';
 import type { AgentTool } from '@samix/shared';
 import type { PathPolicy } from '../security/path-policy.js';
 import { ToolRegistry } from './registry.js';
 import { AppRegistry } from './apps/app-registry.js';
+import { BrowserSession } from './browser/session.js';
 import {
-  createBrowserOpenUrlTool,
+  createBrowserClickTool,
+  createBrowserCloseTool,
+  createBrowserExtractTextTool,
+  createBrowserGotoTool,
+  createBrowserScreenshotTool,
+  createBrowserScrollTool,
   createBrowserSearchTool,
-} from './apps/browser.js';
+} from './browser/tools.js';
 import {
   createAppCloseTool,
   createAppLaunchTool,
   createAppListTool,
   processListTool,
 } from './apps/tools.js';
+import {
+  createScreenGetActiveWindowTool,
+  createWindowCloseTool,
+  createWindowFocusTool,
+  createWindowListTool,
+  type ReferentSource,
+} from './windows/tools.js';
 import {
   createCopyTool,
   createCreateDirectoryTool,
@@ -36,6 +50,33 @@ export { AppRegistry, discoverApps, isLaunchable } from './apps/app-registry.js'
 export type { AppKind, DiscoveredApp } from './apps/app-registry.js';
 export { closeProcess, isProcessRunning, isValidImageName, listProcesses } from './windows/processes.js';
 export type { RunningProcess } from './windows/processes.js';
+export {
+  getActiveWindow,
+  isValidHandle,
+  listWindows,
+  WindowQueryError,
+} from './windows/ui-automation.js';
+export type { WindowInfo } from './windows/ui-automation.js';
+export {
+  createScreenGetActiveWindowTool,
+  createWindowCloseTool,
+  createWindowFocusTool,
+  createWindowListTool,
+  windowsAutomation,
+} from './windows/tools.js';
+export type { ReferentSource, WindowAutomation, WindowReferents } from './windows/tools.js';
+export { BrowserSession, BrowserSessionError, DEFAULT_DEBUG_PORT } from './browser/session.js';
+export type { ProfileKind, SessionStatus } from './browser/session.js';
+export {
+  createBrowserClickTool,
+  createBrowserCloseTool,
+  createBrowserExtractTextTool,
+  createBrowserGotoTool,
+  createBrowserScreenshotTool,
+  createBrowserScrollTool,
+  createBrowserSearchTool,
+  parseWebUrl,
+} from './browser/tools.js';
 export { formatBytes, guardPath, shorthandNames, toAbsolutePath } from './filesystem/guard.js';
 export type { GuardedPath, PathIntent } from './filesystem/guard.js';
 
@@ -44,6 +85,22 @@ export interface ToolRegistryDeps {
   readonly pathPolicy: PathPolicy;
   /** Injectable so tests can supply a fake instead of scanning Program Files. */
   readonly apps?: AppRegistry;
+  /** Root for screenshots and the agent's browser profile. */
+  readonly cacheDir: string;
+  /**
+   * What "it" and "this window" currently point at. Supplied by the agent's
+   * context so window tools can fall back to the last application acted on
+   * (spec §80) without the tools layer depending on the agent.
+   */
+  readonly referents?: ReferentSource;
+  /** Injectable so tests never start a browser. */
+  readonly browser?: BrowserSession;
+}
+
+export interface ToolSet {
+  readonly registry: ToolRegistry;
+  /** Held so the runtime can release the browser connection at shutdown. */
+  readonly browser: BrowserSession;
 }
 
 /**
@@ -60,10 +117,18 @@ export interface ToolRegistryDeps {
  * the tool's own schema before calling it, so the erased type is recovered at
  * exactly the point it matters.
  */
-export function createToolRegistry(deps: ToolRegistryDeps): ToolRegistry {
+export function createToolRegistry(deps: ToolRegistryDeps): ToolSet {
   const registry = new ToolRegistry();
   const apps = deps.apps ?? new AppRegistry();
   const policy = deps.pathPolicy;
+  const referents: ReferentSource = deps.referents ?? ((): Record<string, never> => ({}));
+
+  // One session shared by every browser tool. Two sessions would mean two page
+  // handles, and `browser.extractText` would read a page that `browser.goto`
+  // never navigated — the bug that makes browser automation feel haunted.
+  const browser =
+    deps.browser ??
+    new BrowserSession({ apps, profileDir: path.join(deps.cacheDir, 'browser-profile') });
 
   // Warm the application cache in the background. Discovery scans Program Files
   // and takes a noticeable second or two; paying it here means the user pays it
@@ -98,10 +163,26 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolRegistry {
     erase(createAppCloseTool(apps) as unknown as AgentTool<never, never>),
     erase(processListTool as unknown as AgentTool<never, never>),
 
-    // --- Phase 6 (partial): showing web pages to the user --------------------
-    erase(createBrowserOpenUrlTool(apps) as unknown as AgentTool<never, never>),
-    erase(createBrowserSearchTool(apps) as unknown as AgentTool<never, never>),
+    // --- Phase 6: browser automation over the DevTools protocol --------------
+    erase(createBrowserGotoTool(browser) as unknown as AgentTool<never, never>),
+    erase(createBrowserSearchTool(browser) as unknown as AgentTool<never, never>),
+    erase(createBrowserScrollTool(browser) as unknown as AgentTool<never, never>),
+    erase(createBrowserClickTool(browser) as unknown as AgentTool<never, never>),
+    erase(createBrowserExtractTextTool(browser) as unknown as AgentTool<never, never>),
+    erase(
+      createBrowserScreenshotTool(
+        browser,
+        path.join(deps.cacheDir, 'screenshots'),
+      ) as unknown as AgentTool<never, never>,
+    ),
+    erase(createBrowserCloseTool(browser) as unknown as AgentTool<never, never>),
+
+    // --- Phase 7 (partial): windows on the user's desktop --------------------
+    erase(createWindowListTool(apps) as unknown as AgentTool<never, never>),
+    erase(createScreenGetActiveWindowTool() as unknown as AgentTool<never, never>),
+    erase(createWindowFocusTool(apps, referents) as unknown as AgentTool<never, never>),
+    erase(createWindowCloseTool(apps, referents) as unknown as AgentTool<never, never>),
   ]);
 
-  return registry;
+  return { registry, browser };
 }

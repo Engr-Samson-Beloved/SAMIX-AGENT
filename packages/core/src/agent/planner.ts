@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentMode, Task, TaskStep, ToolError } from '@samix/shared';
 import type { ToolRegistry } from '../tools/registry.js';
+import type { Referents } from './context.js';
 
 /**
  * Planner contract (spec §27, §28).
@@ -45,6 +46,12 @@ export interface PlanRequest {
    * instruction. A planner may ignore it; the rule-based one does.
    */
   readonly history: readonly ConversationTurn[];
+  /**
+   * What "it", "that" and "this window" currently point at (spec §80). Facts the
+   * agent observed during execution, not things it was told — so they can be
+   * stated to the model as current rather than remembered.
+   */
+  readonly referents: Referents;
   readonly signal: AbortSignal;
 }
 
@@ -59,6 +66,12 @@ export type PlanResult =
   | { kind: 'steps'; steps: PlannedStep[] }
   | { kind: 'reply'; message: string }
   | { kind: 'clarify'; question: string; options?: string[] }
+  /**
+   * An offer, not an action: the message is said to the user and the call is
+   * stored. If they agree next turn, the orchestrator runs `step` verbatim
+   * rather than re-planning it (spec §80).
+   */
+  | { kind: 'propose'; message: string; step: PlannedStep }
   /** Recovery only: no way forward, fail the task with this explanation. */
   | { kind: 'give-up'; reason: string };
 

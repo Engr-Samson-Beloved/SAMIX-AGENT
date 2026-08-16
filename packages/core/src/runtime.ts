@@ -4,6 +4,7 @@ import {
   type LogLevel,
 } from '@samix/shared';
 import { Agent } from './agent/agent.js';
+import { AgentContext } from './agent/context.js';
 import { StepExecutor } from './agent/executor.js';
 import { HybridPlanner } from './agent/hybrid-planner.js';
 import { LlmPlanner } from './agent/llm-planner.js';
@@ -114,8 +115,17 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
   // with an explicit late-binding holder rather than a mutable field on either
   // object — the indirection is the point, so it should be visible.
   const agentRef: { current: Agent | undefined } = { current: undefined };
-  const registry = createToolRegistry({
+  // Conversational context is constructed before the tools because the window
+  // tools read from it: "close this window" falls back to the last application
+  // the agent acted on (spec §80).
+  const context = new AgentContext();
+  const { registry, browser } = createToolRegistry({
     pathPolicy,
+    cacheDir: paths.cacheDir,
+    referents: () => {
+      const { app } = context.referents;
+      return app === undefined ? {} : { app };
+    },
     statusProvider: () => {
       const current = config.get();
       const mode = current.automation.mode;
@@ -197,6 +207,7 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     executor,
     planner,
     tasks,
+    context,
     logger: rootLog,
     version: RUNTIME_VERSION,
   });
@@ -240,13 +251,19 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
         ? 'launch, close and list installed applications'
         : 'process control is implemented for Windows only',
   });
-  // "ready" is true of what is built, and the detail carries the limit: opening
-  // a page works, reading one back does not. The tools say so themselves in
-  // their descriptions, so the planner cannot plan around a capability we lack.
   agent.setSubsystem({
     name: 'browser',
-    status: 'ready',
-    detail: 'opens pages and searches — cannot read pages back (Playwright is Phase 6)',
+    status: process.platform === 'win32' ? 'ready' : 'unavailable',
+    detail:
+      'Playwright over the DevTools protocol: opens, reads, scrolls, clicks and captures real pages',
+  });
+  agent.setSubsystem({
+    name: 'windows',
+    status: process.platform === 'win32' ? 'ready' : 'unavailable',
+    detail:
+      process.platform === 'win32'
+        ? 'list, focus and close desktop windows; read the active window'
+        : 'window management is implemented for Windows only',
   });
 
   // Whether an API key exists is an async question, and blocking startup on the
@@ -274,6 +291,9 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     shuttingDown = true;
     log.info('core shutting down');
     agent.cancel('shutdown');
+    // Release the CDP connection, never the browser itself: the user's windows
+    // and tabs are theirs, and an agent that closes them on exit has overstepped.
+    void browser.dispose();
     bus.removeAll();
     audit.close();
     logger.close();
