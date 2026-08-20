@@ -251,13 +251,39 @@ the controls inside a window, but no tool is wired to it yet.**
       button wired to nothing and gets `unverified`, never `verified`.
       `setValue` on a read-only control is refused with `PATTERN_UNAVAILABLE`.
       Confirmed live against the fixture window, not just the unit suite.
-- [ ] **Step 4** — mouse and keyboard with interpolated movement, the per-task
-      action budget, a queue-draining emergency stop, and the target overlay.
+- [x] ~~**Step 4 — mouse and keyboard.**~~ `desktop.click`, `desktop.type`,
+      `desktop.pressKey` over `SendInput` — the last resort for a control with
+      no pattern to call. An element-targeted click reuses `invoke`'s exact
+      stale-ref guard and three-signal delta; a raw `(x, y)` click has nothing
+      to check against, so `floor:raw-coordinates` confirms it in every mode,
+      and `desktop.type`/`desktop.pressKey` report `unverified`
+      unconditionally — there is no Value pattern to read back, by
+      definition, or the action would have gone through `setValue` instead.
+      Movement is interpolated over `cursorMoveMs` (real intermediate
+      `WM_MOUSEMOVE` messages, not one teleporting `SetCursorPos` — hover and
+      drag targets are computed from those, not the endpoint), and
+      `maxActionsPerTask` is enforced in the executor as a hard fail before
+      confirmation is even considered, never a prompt.
+      Emergency stop now does what `Agent.emergencyStop()`'s comment always
+      promised: releases whatever the sidecar is holding, on the reader
+      thread, ahead of the cancellation token. The harder case — `stop`
+      arriving mid-chord, after a modifier went down but before the tap — is
+      closed by one lock in `input.py`'s `InputState` covering the OS call
+      *and* the bookkeeping as a single unit on both sides, so a release and a
+      press can never interleave with the release landing first.
+      Confirmed live: `pnpm check:desktop` toggles a checkbox by screen
+      position and gets the same toggle evidence `invoke` does, types into a
+      field then continues with no ref into whatever now has focus, and
+      drives the action budget to its limit and back off.
+      **Deferred, deliberately:** the target overlay. Different kind of work —
+      a new transparent always-on-top Tauri window and an event channel
+      through `sidecar.rs` — worth doing once the input plumbing above has
+      been trusted on its own for a while.
 - [ ] **Step 5** — `screen.capture` and vision as a metered fallback (§16, §18).
 - [ ] **Step 6** — per-application recipes as declarative YAML data.
-- [ ] Emergency stop must release synthetic input — hook is reserved in
-      `Agent.emergencyStop()`. `DesktopSidecar.emergencyStop()` exists and drains
-      both queues; nothing calls it yet because no input tool exists.
+- [x] ~~Emergency stop must release synthetic input.~~ See Step 4 above —
+      `releaseInputControl` is wired end to end, and the release-ordering race
+      it depends on is what that entry's locking note is about.
 - [ ] **The equivalence check cannot prove `isOwn` is right, only that both back
       ends agree.** On this machine both report zero own windows, because of the
       ConPTY limitation below, so the one field where a port could do real damage

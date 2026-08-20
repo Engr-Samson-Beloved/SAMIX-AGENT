@@ -12,8 +12,14 @@ export { classifyResponse } from './agent/affirmative.js';
 export type { Response } from './agent/affirmative.js';
 export { AgentContext, describeReferents, PROPOSAL_TTL_MS } from './agent/context.js';
 export type { PendingProposal, Referents } from './agent/context.js';
-export { StepExecutor } from './agent/executor.js';
-export type { ConfirmationGate, ExecuteStepContext, ExecutorDeps, StepOutcome } from './agent/executor.js';
+export { createActionBudget, StepExecutor } from './agent/executor.js';
+export type {
+  ActionBudget,
+  ConfirmationGate,
+  ExecuteStepContext,
+  ExecutorDeps,
+  StepOutcome,
+} from './agent/executor.js';
 export { HybridPlanner } from './agent/hybrid-planner.js';
 export { LlmPlanner } from './agent/llm-planner.js';
 export type { LlmPlannerDeps } from './agent/llm-planner.js';
@@ -190,11 +196,15 @@ export { pythonCandidates, sidecarArgs, sidecarRoot, venvPython } from './tools/
 export { DesktopContext, CONTEXT_TTL_MS } from './tools/desktop/context.js';
 export type { RememberedElement, RememberedWindow } from './tools/desktop/context.js';
 export {
+  createDesktopClickTool,
   createDesktopFindElementTool,
   createDesktopInvokeTool,
+  createDesktopPressKeyTool,
   createDesktopSetValueTool,
   createDesktopSnapshotTool,
+  createDesktopTypeTool,
 } from './tools/desktop/tools.js';
+export type { ClickResult, TypeResult } from './tools/desktop/tools.js';
 export { dangerousWordIn } from './security/permissions.js';
 export type { PythonCandidate, PythonSource } from './tools/desktop/python.js';
 

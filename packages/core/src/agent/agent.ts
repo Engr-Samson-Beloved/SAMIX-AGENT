@@ -19,7 +19,7 @@ import type { ToolRegistry } from '../tools/registry.js';
 import { classifyResponse } from './affirmative.js';
 import { CancellationToken } from './cancellation.js';
 import { AgentContext } from './context.js';
-import { type StepExecutor } from './executor.js';
+import { createActionBudget, type ActionBudget, type StepExecutor } from './executor.js';
 import { toTaskSteps, type ConversationTurn, type PlanResult, type Planner } from './planner.js';
 import { AgentStateMachine } from './state-machine.js';
 import { type TaskManager } from './task-manager.js';
@@ -67,6 +67,12 @@ export interface AgentDeps {
    * callers and tests keep working; one is created if none is supplied.
    */
   readonly context?: AgentContext;
+  /**
+   * Release synthetic mouse and keyboard state (Phase 7 §5). Absent when no
+   * desktop sidecar is running — nothing was ever pressed on its behalf, so
+   * there is nothing to release. See `Agent.emergencyStop()`.
+   */
+  readonly releaseInputControl?: () => void;
 }
 
 export interface SubsystemStatus {
@@ -88,6 +94,8 @@ export class Agent {
   private taskApproved = false;
   /** Latched by emergency stop; blocks new work until cleared. */
   private stopped = false;
+  /** Phase 7 §5: recreated per task from `automation.desktop.maxActionsPerTask`. */
+  private actionBudget: ActionBudget = createActionBudget(0);
 
   private readonly log: Logger;
   private readonly context: AgentContext;
@@ -186,6 +194,9 @@ export class Agent {
     const task = this.deps.tasks.create(instruction, source, this.mode);
     this.token = new CancellationToken();
     this.taskApproved = false;
+    this.actionBudget = createActionBudget(
+      this.deps.config.get().automation.desktop.maxActionsPerTask,
+    );
 
     publish(this.deps.bus, { type: 'task.created', task });
     this.log.info('task created', { taskId: task.id, source, instruction });
@@ -384,6 +395,7 @@ export class Agent {
       security: { trustedApplications: config.security.trustedApplications },
       token: this.token,
       taskApproved: this.taskApproved,
+      actionBudget: this.actionBudget,
     });
 
     // The executor moves us through observe/verify conceptually; reflect that in
@@ -571,13 +583,19 @@ export class Agent {
    * Emergency stop (spec §33).
    *
    * Stronger than cancel: it also latches the agent closed so no further work
-   * starts until `resume()`. Phase 7 adds the release of synthetic mouse and
-   * keyboard state here — the hook is `releaseInputControl`, wired when those
-   * tools exist.
+   * starts until `resume()`. Releases synthetic mouse and keyboard state
+   * before anything else — a stuck modifier key or a held mouse button is
+   * live on the user's machine for as long as this takes to run, so it goes
+   * first, ahead of even the cancellation token.
    */
   emergencyStop(): { stopped: boolean; cancelledTaskId?: string } {
     const task = this.deps.tasks.activeTask;
     this.stopped = true;
+    try {
+      this.deps.releaseInputControl?.();
+    } catch (cause) {
+      this.log.warn('releasing synthetic input failed', { error: String(cause) });
+    }
     this.token.cancel('emergency-stop', 'Emergency stop');
     this.pendingConfirmation = undefined;
 

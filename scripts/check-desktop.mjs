@@ -51,6 +51,10 @@ const {
   createDesktopFindElementTool,
   createDesktopInvokeTool,
   createDesktopSetValueTool,
+  createDesktopClickTool,
+  createDesktopTypeTool,
+  createDesktopPressKeyTool,
+  createActionBudget,
 } = await import(pathToFileURL(entry).href);
 const { defaultConfig } = await import(
   pathToFileURL(path.join(root, 'packages', 'shared', 'dist', 'index.js')).href
@@ -304,6 +308,82 @@ try {
         const r = await setValue.execute({ handle, ref: label.ref, tree, text: 'x' }, ctx);
         return !r.success && r.error?.code === 'PATTERN_UNAVAILABLE';
       })());
+
+    // --- synthetic input: last resort, real cursor and keystrokes (step 4) --
+    //
+    // Same fixture, same rule as above: writes only to a window this process
+    // created and owns.
+    console.log('');
+    const click = createDesktopClickTool(sidecar, context);
+    const type = createDesktopTypeTool(sidecar, context);
+    const pressKey = createDesktopPressKeyTool(sidecar, context);
+
+    check('a raw-coordinate click always asks for confirmation',
+      click.describeTarget({ x: 0, y: 0 })?.rawCoordinates === true);
+
+    // The checkbox is "on" from the invoke check above. A click toggles it the
+    // other way — different mechanism (SendInput at its screen bounds, not the
+    // Toggle pattern), same observable evidence.
+    const box2Found = await find.execute({ handle, query: 'Remember', limit: 5 }, ctx);
+    const box2 = box2Found.data.matches[0];
+    const box2Args = { handle, ref: box2.ref, tree: box2Found.data.tree };
+    const clicked = await click.execute(box2Args, ctx);
+    const clickedVerdict = clicked.success ? await click.verify(box2Args, clicked, ctx) : undefined;
+    check('desktop.click toggles a checkbox by its screen position',
+      clicked.success && clicked.data.toggleBefore === 'on' && clicked.data.toggleAfter === 'off',
+      `${clicked.data?.toggleBefore} -> ${clicked.data?.toggleAfter}`);
+    check('and verifies from the toggle state, exactly like invoke',
+      clickedVerdict?.status === 'verified', clickedVerdict?.detail);
+
+    // A raw point click on the Send button — same control as above, addressed
+    // by screen position instead of ref, and safely inside the fixture window
+    // rather than an arbitrary point on the real desktop. No element to
+    // re-read this way, so the only honest answers are "a window opened" or
+    // admitted ignorance — never `verified`.
+    const freshSnap = SnapshotSchema.parse(await sidecar.call('snapshot', { handle }, 10_000));
+    const sendEl = freshSnap.elements.find((e) => e.name === 'Send');
+    const [sx, sy, sw, sh] = sendEl.bounds;
+    const point = { x: Math.round(sx + sw / 2), y: Math.round(sy + sh / 2) };
+    const rawClick = await click.execute(point, ctx);
+    const rawVerdict = rawClick.success ? await click.verify(point, rawClick, ctx) : undefined;
+    check('a raw-point click with nothing to check against is unverified, not verified',
+      rawClick.success && rawVerdict.status !== 'verified', rawVerdict?.detail);
+
+    // desktop.type: click into the Message field and type, then continue
+    // typing with no ref at all — into whatever now has focus, which is still
+    // that field.
+    const field2Found = await find.execute({ handle, query: 'Message', limit: 5 }, ctx);
+    const field2 = field2Found.data.matches[0];
+    const typedChars = await type.execute(
+      { handle, ref: field2.ref, tree: field2Found.data.tree, text: ' typed' },
+      ctx,
+    );
+    check('desktop.type sends every character of a short string',
+      typedChars.success && typedChars.data.sent === ' typed'.length && !typedChars.data.cancelled,
+      `sent ${typedChars.data?.sent}`);
+
+    const typedMore = await type.execute({ text: '!' }, ctx);
+    check('desktop.type with no ref types into whatever already has focus',
+      typedMore.success && typedMore.data.sent === 1, `sent ${typedMore.data?.sent}`);
+
+    const typeVerdict = await type.verify({ text: '!' }, typedMore, ctx);
+    check('desktop.type is always unverified — there is no value pattern to read back',
+      typeVerdict.status === 'unverified', typeVerdict.detail);
+
+    // desktop.pressKey: Tab is always safe and always available.
+    const tabbed = await pressKey.execute({ keys: 'Tab' }, ctx);
+    check('desktop.pressKey sends a named key', tabbed.success && tabbed.data.parts.includes('Tab'));
+    const tabbedVerdict = await pressKey.verify({ keys: 'Tab' }, tabbed, ctx);
+    check('desktop.pressKey is always unverified — a key press has no element to re-check',
+      tabbedVerdict.status === 'unverified', tabbedVerdict.detail);
+
+    // --- the per-task action budget (§5) -------------------------------
+    const budget = createActionBudget(2);
+    check(
+      'the action budget allows exactly its limit, then refuses',
+      budget.consume() === true && budget.consume() === true && budget.consume() === false,
+      `limit ${budget.limit}`,
+    );
   }
 
   // --- idle cost ----------------------------------------------------------

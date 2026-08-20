@@ -464,7 +464,7 @@ class Server:
 
     def _op_click(self, params: dict[str, Any]) -> dict[str, Any]:
         button = str(params.get("button", "left") or "left")
-        double = bool(params.get("double", False))
+        double = bool(params.get("doubleClick", False))
         move_ms = _move_ms(params)
         has_ref = params.get("ref") is not None
 

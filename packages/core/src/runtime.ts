@@ -242,6 +242,11 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     context,
     logger: rootLog,
     version: RUNTIME_VERSION,
+    // Phase 7 §5: an emergency stop releases whatever the sidecar's own
+    // synthetic input state is holding, regardless of which desktop tool
+    // pressed it. `DesktopSidecar.emergencyStop()` is a no-op if the sidecar
+    // was never started, so this is safe to wire unconditionally.
+    releaseInputControl: () => desktop.emergencyStop(),
   });
   agentRef.current = agent;
 
