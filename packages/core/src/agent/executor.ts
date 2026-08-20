@@ -45,6 +45,35 @@ import { withTimeout, type CancellationToken } from './cancellation.js';
 
 export type ConfirmationGate = (request: ConfirmationRequest) => Promise<boolean>;
 
+/**
+ * A per-task ceiling on synthetic input actions (Phase 7 §5,
+ * `automation.desktop.maxActionsPerTask`).
+ *
+ * Owned by whoever runs the task — one instance per task, never shared across
+ * two — and consulted only for a tool with `consumesActionBudget: true`. On
+ * exhaustion the step FAILS; the executor never turns "the budget is spent"
+ * into a confirmation prompt, because a budget a task can talk its way past is
+ * not a budget.
+ */
+export interface ActionBudget {
+  readonly limit: number;
+  /** True and decrements if budget remains; false and unchanged once spent. */
+  consume(): boolean;
+}
+
+/** The one implementation. A closure would work too; this names the concept. */
+export function createActionBudget(limit: number): ActionBudget {
+  let remaining = limit;
+  return {
+    limit,
+    consume(): boolean {
+      if (remaining <= 0) return false;
+      remaining -= 1;
+      return true;
+    },
+  };
+}
+
 export interface ExecutorDeps {
   readonly registry: ToolRegistry;
   readonly permissions: PermissionEngine;
@@ -63,6 +92,9 @@ export interface ExecuteStepContext {
   readonly token: CancellationToken;
   /** True once the user approved the remainder of this task. */
   readonly taskApproved: boolean;
+  /** Phase 7 §5. Absent means no ceiling — used by callers with no synthetic
+   * input tools registered at all, where the concept does not apply. */
+  readonly actionBudget?: ActionBudget;
 }
 
 export interface StepOutcome {
@@ -168,6 +200,24 @@ export class StepExecutor {
         mode: ctx.mode,
       });
       publish(bus, { type: 'permission.denied', tool: tool.name, reason: decision.reason });
+      this.emitFailure(ctx.taskId, step, result, Date.now() - startedAt);
+      return finish('failed', result, undefined, 'blocked');
+    }
+
+    // -- 3.5 Synthetic input budget (Phase 7 §5) ---------------------------
+    //
+    // Checked before confirmation, deliberately: exhaustion fails the task
+    // outright rather than becoming one more prompt for the user to click
+    // through. A budget answerable by a confirmation is a speed bump, not a
+    // ceiling.
+    if (tool.consumesActionBudget && ctx.actionBudget && !ctx.actionBudget.consume()) {
+      const result = err(
+        'ACTION_BLOCKED',
+        `This task has used all ${ctx.actionBudget.limit} of its synthetic input actions ` +
+          `(clicks, typing and key presses). It will not send more.`,
+        { recoverable: false },
+      );
+      log.warn('synthetic input budget exhausted', { tool: tool.name, limit: ctx.actionBudget.limit });
       this.emitFailure(ctx.taskId, step, result, Date.now() - startedAt);
       return finish('failed', result, undefined, 'blocked');
     }

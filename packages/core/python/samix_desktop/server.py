@@ -56,6 +56,7 @@ from typing import Any, Callable
 
 from . import PROTOCOL_VERSION
 from . import actions
+from . import input as input_mod
 from . import tree as tree_mod
 from . import winenv
 
@@ -146,12 +147,16 @@ class Server:
         self._running = True
         self._dpi = dpi
         self._com = com
+        self._input = input_mod.InputState()
         self._ops: dict[str, Callable[[dict[str, Any]], Any]] = {
             "ping": self._op_ping,
             "snapshot": self._op_snapshot,
             "findElement": self._op_find_element,
             "invoke": self._op_invoke,
             "setValue": self._op_set_value,
+            "click": self._op_click,
+            "type": self._op_type,
+            "pressKey": self._op_press_key,
             # Ported from the PowerShell path. Same names, same shapes, same
             # behaviour — see the note at the top of winenv.py.
             "window.list": self._op_window_list,
@@ -205,6 +210,15 @@ class Server:
     def _halt(self) -> None:
         self._running = False
         self._cancel.set()
+        # Whatever this process pressed and has not yet released, release now.
+        # This is the one call that must run on every path out of the server —
+        # stop, shutdown, EOF, a crash unwinding — because a stuck synthetic key
+        # or mouse button left on the user's machine after the sidecar is gone
+        # is not something anything downstream can fix.
+        try:
+            self._input.release_all()
+        except OSError:
+            pass
         try:
             self._work.put_nowait(None)
         except queue.Full:
@@ -256,7 +270,17 @@ class Server:
         if op == "stop":
             self._cancel.set()
             drained = self._drain()
-            self._ok(request_id, {"cancelled": True, "drained": drained})
+            # Released HERE, on the reader thread, the instant stop arrives —
+            # not left to the apartment thread noticing `self._cancel` between
+            # steps. That polling is what stops a *slow* action like an
+            # interpolated move from continuing; a chord already mid-flight
+            # (a modifier down, the tap not yet sent) needs it released now,
+            # not after however many milliseconds are left of this step.
+            try:
+                released = self._input.release_all()
+            except OSError:
+                released = {"keys": [], "buttons": []}
+            self._ok(request_id, {"cancelled": True, "drained": drained, "released": released})
             return
         if op == "shutdown":
             self._ok(request_id, {"stopped": True})
@@ -320,6 +344,12 @@ class Server:
             )
         except actions.RefNotFound as error:
             self._fail(request_id, OpError(ELEMENT_NOT_FOUND, str(error)), elapsed_ms(started))
+        except actions.OpCancelled as error:
+            self._fail(request_id, OpError(USER_CANCELLED, str(error)), elapsed_ms(started))
+        except input_mod.InvalidKey as error:
+            self._fail(
+                request_id, OpError(INVALID_INPUT, str(error), recoverable=False), elapsed_ms(started)
+            )
         except tree_mod.UiaUnavailable as error:
             self._fail(
                 request_id,
@@ -429,6 +459,48 @@ class Server:
         if not isinstance(text, str):
             raise OpError(INVALID_INPUT, "setValue needs the text to set.", recoverable=False)
         return actions.set_value(window, own, _ref(params), _tree(params), text, limits)
+
+    # --- synthetic input (step 4) --------------------------------------------
+
+    def _op_click(self, params: dict[str, Any]) -> dict[str, Any]:
+        button = str(params.get("button", "left") or "left")
+        double = bool(params.get("double", False))
+        move_ms = _move_ms(params)
+        has_ref = params.get("ref") is not None
+
+        if has_ref:
+            window, own, limits = self._target(params)
+            return actions.click_element(
+                window, own, self._input, _ref(params), _tree(params), limits,
+                button=button, double=double, move_ms=move_ms, should_cancel=self._cancel.is_set,
+            )
+
+        own = _own(params)
+        x, y = _coordinate(params, "x"), _coordinate(params, "y")
+        limits = _limits(params)
+        return actions.click_point(
+            x, y, own, self._input, limits,
+            button=button, double=double, move_ms=move_ms, should_cancel=self._cancel.is_set,
+        )
+
+    def _op_type(self, params: dict[str, Any]) -> dict[str, Any]:
+        text = params.get("text")
+        if not isinstance(text, str):
+            raise OpError(INVALID_INPUT, "type needs the text to send.", recoverable=False)
+
+        if params.get("ref") is not None:
+            window, own, limits = self._target(params)
+            return actions.type_into_element(
+                window, own, self._input, _ref(params), _tree(params), text, limits,
+                move_ms=_move_ms(params), should_cancel=self._cancel.is_set,
+            )
+        return actions.type_focused(text, should_cancel=self._cancel.is_set)
+
+    def _op_press_key(self, params: dict[str, Any]) -> dict[str, Any]:
+        keys = params.get("keys")
+        if not isinstance(keys, str) or keys.strip() == "":
+            raise OpError(INVALID_INPUT, "pressKey needs the key or chord to send.", recoverable=False)
+        return actions.press_keys(keys, self._input)
 
     # --- window ops ---------------------------------------------------------
     #
@@ -546,3 +618,27 @@ def _handle(params: dict[str, Any]) -> int:
     if handle <= 0:
         raise OpError(INVALID_INPUT, f"Implausible window handle: {handle}", recoverable=False)
     return handle
+
+
+def _move_ms(params: dict[str, Any]) -> int:
+    """Milliseconds to interpolate a cursor move over. `0` jumps instantly."""
+    try:
+        move_ms = int(params.get("moveMs", 0) or 0)
+    except (TypeError, ValueError):
+        raise OpError(INVALID_INPUT, "moveMs must be a number.", recoverable=False) from None
+    if move_ms < 0:
+        raise OpError(INVALID_INPUT, "moveMs cannot be negative.", recoverable=False)
+    return move_ms
+
+
+def _coordinate(params: dict[str, Any], key: str) -> int:
+    """A raw screen coordinate. Physical pixels, and it must actually be one —
+    a raw click with no window to bound it has nothing else to check it against."""
+    raw = params.get(key)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise OpError(
+            INVALID_INPUT, f'A coordinate click needs "{key}": got {raw!r}.', recoverable=False
+        ) from None
+    return value

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import threading
 import time
 from typing import Callable
 
@@ -210,27 +211,47 @@ class InputState:
     Nothing is ever added on the strength of a guess about the real keyboard —
     only `key_down`/`mouse_down` below add an entry, and only the matching `_up`
     call or `release_all` removes it.
+
+    Locked, because `release_all` is called from the reader thread the instant a
+    `stop` control frame arrives, which can be the same moment the apartment
+    thread is mid-chord — Ctrl pressed, main key not yet tapped.
+
+    The lock covers the OS call *and* the bookkeeping as one unit, on both
+    sides, not just the two sets. A narrower lock — record first, send after —
+    still lets a key-down and a `release_all`'s key-up interleave at the OS
+    level with the up landing first, which leaves the key down: `release_all`
+    would have run, reported success, and the modifier would still be held.
+    Holding the same lock across "send, then record" and across the whole
+    release loop makes the two strictly ordered instead: whichever started
+    first finishes first, so a key that is down when `release_all` begins is
+    always the one it releases, and one that begins after always outlives it
+    until the next stop.
     """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._keys_down: set[int] = set()
         self._buttons_down: set[str] = set()
 
     def key_down(self, vk: int) -> None:
-        _send([_key_input(vk, 0)])
-        self._keys_down.add(vk)
+        with self._lock:
+            _send([_key_input(vk, 0)])
+            self._keys_down.add(vk)
 
     def key_up(self, vk: int) -> None:
-        _send([_key_input(vk, _KEYEVENTF_KEYUP)])
-        self._keys_down.discard(vk)
+        with self._lock:
+            _send([_key_input(vk, _KEYEVENTF_KEYUP)])
+            self._keys_down.discard(vk)
 
     def mouse_down(self, button: str) -> None:
-        _send([_mouse_input(_BUTTON_DOWN[button])])
-        self._buttons_down.add(button)
+        with self._lock:
+            _send([_mouse_input(_BUTTON_DOWN[button])])
+            self._buttons_down.add(button)
 
     def mouse_up(self, button: str) -> None:
-        _send([_mouse_input(_BUTTON_UP[button])])
-        self._buttons_down.discard(button)
+        with self._lock:
+            _send([_mouse_input(_BUTTON_UP[button])])
+            self._buttons_down.discard(button)
 
     def release_all(self) -> dict[str, list]:
         """Undo exactly what this process left pressed. Idempotent and cheap.
@@ -239,18 +260,21 @@ class InputState:
         must release synthetic input), so it must never raise merely because
         there was nothing to release.
         """
-        released = {"keys": sorted(self._keys_down), "buttons": sorted(self._buttons_down)}
-        for vk in list(self._keys_down):
-            try:
-                self.key_up(vk)
-            except OSError:
-                pass
-        for button in list(self._buttons_down):
-            try:
-                self.mouse_up(button)
-            except OSError:
-                pass
-        return released
+        with self._lock:
+            keys, buttons = sorted(self._keys_down), sorted(self._buttons_down)
+            for vk in keys:
+                try:
+                    _send([_key_input(vk, _KEYEVENTF_KEYUP)])
+                except OSError:
+                    pass
+                self._keys_down.discard(vk)
+            for button in buttons:
+                try:
+                    _send([_mouse_input(_BUTTON_UP[button])])
+                except OSError:
+                    pass
+                self._buttons_down.discard(button)
+        return {"keys": keys, "buttons": buttons}
 
 
 # --- mouse ---------------------------------------------------------------

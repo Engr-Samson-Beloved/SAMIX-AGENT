@@ -313,3 +313,167 @@ def set_value(
         "valueAfter": after_value,
         "matches": after_value == text,
     }
+
+
+# --- synthetic input (step 4): last resort when no pattern applies ----------
+#
+# `invoke` and `set_value` above drive a control through the pattern it
+# advertises, which is exact and needs no visible cursor motion at all. These
+# three exist for the control that advertises none: nothing to Invoke, nothing
+# to set, sometimes not even an accessible name — a custom-drawn button, most
+# games, a canvas. `tools.py` on the TypeScript side documents the same
+# ordering, and the permission engine floors a raw-coordinate click to always
+# confirm, which a pattern-based `invoke` never needs to.
+
+
+def click_element(
+    window: Window,
+    own,
+    state: "input_mod.InputState",
+    ref: int,
+    tree: str,
+    limits: SnapshotLimits,
+    button: str = "left",
+    double: bool = False,
+    move_ms: int = 0,
+    should_cancel: Callable[[], bool] = lambda: False,
+) -> dict:
+    """Click the center of a known element. Same stale-ref guard as `invoke`,
+    same three-signal delta, so the two share a verifier on the TypeScript side."""
+    resolved = resolve(window, ref, tree, limits)
+    node = resolved.node
+
+    if not node.enabled:
+        raise PatternUnavailable(f'"{node.name or node.role}" is disabled.')
+    if node.bounds.area <= 0:
+        raise PatternUnavailable(
+            f'"{node.name or node.role}" has no on-screen area to click — it may be hidden.'
+        )
+
+    cx = node.bounds.x + node.bounds.width // 2
+    cy = node.bounds.y + node.bounds.height // 2
+
+    before = _observe(window, own, limits)
+    toggle_before = _toggle_state(resolved)
+
+    completed = input_mod.click(
+        cx, cy, state, button=button, double=double, move_ms=move_ms, should_cancel=should_cancel
+    )
+    if not completed:
+        raise OpCancelled("The click was cancelled while the cursor was still moving.")
+
+    time.sleep(input_mod.SETTLE_SECONDS)
+    after = _observe(window, own, limits)
+
+    toggle_after = None
+    if toggle_before is not None and ref <= len(after["_snapshot"].nodes):
+        fresh = Resolved(after["_snapshot"], after["_snapshot"].nodes[ref - 1], after["_snapshot"].raw[ref - 1])
+        toggle_after = _toggle_state(fresh)
+
+    return {
+        "ref": ref,
+        "name": node.name,
+        "role": node.role,
+        "runtimeId": node.runtime_id,
+        "how": "click",
+        "point": [cx, cy],
+        "toggleBefore": toggle_before,
+        "toggleAfter": toggle_after,
+        **_delta(before, after),
+    }
+
+
+def click_point(
+    x: int,
+    y: int,
+    own,
+    state: "input_mod.InputState",
+    limits: SnapshotLimits,
+    button: str = "left",
+    double: bool = False,
+    move_ms: int = 0,
+    should_cancel: Callable[[], bool] = lambda: False,
+) -> dict:
+    """Click a raw screen point. No element, so no structure hash to compare —
+    the only evidence available is whether a new window appeared."""
+    from . import winenv  # noqa: PLC0415
+
+    before_windows = sorted(w.handle for w in winenv.list_windows(own))
+    completed = input_mod.click(
+        x, y, state, button=button, double=double, move_ms=move_ms, should_cancel=should_cancel
+    )
+    if not completed:
+        raise OpCancelled("The click was cancelled while the cursor was still moving.")
+
+    time.sleep(input_mod.SETTLE_SECONDS)
+    after_windows = sorted(w.handle for w in winenv.list_windows(own))
+    return {
+        "point": [x, y],
+        "how": "click",
+        "newWindows": sorted(set(after_windows) - set(before_windows)),
+    }
+
+
+def type_into_element(
+    window: Window,
+    own,
+    state: "input_mod.InputState",
+    ref: int,
+    tree: str,
+    text: str,
+    limits: SnapshotLimits,
+    move_ms: int = 0,
+    should_cancel: Callable[[], bool] = lambda: False,
+) -> dict:
+    """Click a known element to focus it, then type into whatever now has focus.
+
+    Deliberately not the Value pattern: this is for the control that does not
+    support one. A control that DOES support Value should go through
+    `set_value` instead — it is atomic and cannot be interleaved with the
+    user's own keystrokes, which typing character by character always can be.
+    """
+    resolved = resolve(window, ref, tree, limits)
+    node = resolved.node
+    if not node.enabled:
+        raise PatternUnavailable(f'"{node.name or node.role}" is disabled.')
+    if node.bounds.area <= 0:
+        raise PatternUnavailable(
+            f'"{node.name or node.role}" has no on-screen area to click — it may be hidden.'
+        )
+
+    cx = node.bounds.x + node.bounds.width // 2
+    cy = node.bounds.y + node.bounds.height // 2
+    if not input_mod.click(cx, cy, state, move_ms=move_ms, should_cancel=should_cancel):
+        raise OpCancelled("Cancelled while moving to the field.")
+    time.sleep(input_mod.SETTLE_SECONDS)
+
+    sent = input_mod.send_text(text, should_cancel)
+    return {
+        "ref": ref,
+        "name": node.name,
+        "role": node.role,
+        "runtimeId": node.runtime_id,
+        "requested": text,
+        "sent": sent,
+        "cancelled": sent < len(text),
+    }
+
+
+def type_focused(text: str, should_cancel: Callable[[], bool] = lambda: False) -> dict:
+    """Type into whatever already has keyboard focus. No element to resolve —
+    this is for continuing to type after a click, or into a dialog that opened
+    already focused."""
+    sent = input_mod.send_text(text, should_cancel)
+    return {"requested": text, "sent": sent, "cancelled": sent < len(text)}
+
+
+def press_keys(chord: str, state: "input_mod.InputState") -> dict:
+    """A key or chord — "Enter", "Ctrl+A", "Alt+F4" — sent to whatever has
+    focus. No target to observe, so the caller reports this `unverified`
+    unless the chord happens to close or open a window."""
+    parts = input_mod.press_keys(chord, state)
+    return {"chord": chord, "parts": parts}
+
+
+class OpCancelled(Exception):
+    """A synthetic-input action was cancelled while it was still in motion."""

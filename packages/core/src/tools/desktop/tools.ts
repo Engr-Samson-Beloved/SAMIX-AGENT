@@ -469,3 +469,334 @@ export function createDesktopSetValueTool(
 function truncate(text: string, limit = 60): string {
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
+
+// ---------------------------------------------------------------------------
+// desktop.click / desktop.type / desktop.pressKey (step 4)
+// ---------------------------------------------------------------------------
+//
+// `invoke` and `setValue` above drive a control through the pattern it
+// advertises — exact, and needs no cursor motion at all. These three exist for
+// the control that advertises none: nothing to Invoke, nothing to set,
+// sometimes not even a name — a custom-drawn button, most games, a canvas.
+// Prefer an element ref wherever one exists; a raw coordinate is a guess about
+// what is under a pixel, which is exactly why it always confirms (see the note
+// at the top of this file, and `permissions.ts`'s `floor:raw-coordinates`).
+//
+// All three count against `automation.desktop.maxActionsPerTask`
+// (`consumesActionBudget: true`) — see the field's doc comment in
+// `@samix/shared` for why `invoke` and `setValue` do not.
+
+const ClickElementInput = z
+  .object({
+    ...ActionInput,
+    button: z.enum(['left', 'right', 'middle']).optional(),
+    doubleClick: z.boolean().optional(),
+  })
+  .strict();
+
+const ClickPointInput = z
+  .object({
+    x: z.number().int().describe('Physical-pixel X coordinate on the screen.'),
+    y: z.number().int().describe('Physical-pixel Y coordinate on the screen.'),
+    button: z.enum(['left', 'right', 'middle']).optional(),
+    doubleClick: z.boolean().optional(),
+  })
+  .strict();
+
+const ClickInput = z.union([ClickElementInput, ClickPointInput]);
+type ClickInput = z.infer<typeof ClickInput>;
+
+const ClickElementResultSchema = z.object({
+  ref: z.number().int(),
+  name: z.string(),
+  role: z.string(),
+  runtimeId: z.string(),
+  how: z.string(),
+  point: z.tuple([z.number(), z.number()]),
+  toggleBefore: z.string().nullable(),
+  toggleAfter: z.string().nullable(),
+  treeBefore: z.string(),
+  treeAfter: z.string(),
+  treeChanged: z.boolean(),
+  newWindows: z.array(z.number().int()),
+});
+type ClickElementResult = z.infer<typeof ClickElementResultSchema>;
+
+const ClickPointResultSchema = z.object({
+  point: z.tuple([z.number(), z.number()]),
+  how: z.string(),
+  newWindows: z.array(z.number().int()),
+});
+type ClickPointResult = z.infer<typeof ClickPointResultSchema>;
+
+export type ClickResult = (ClickElementResult & { readonly handle: number }) | ClickPointResult;
+
+function isElementClick(input: ClickInput): input is z.infer<typeof ClickElementInput> {
+  return 'ref' in input;
+}
+
+export function createDesktopClickTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<ClickInput, ClickResult> {
+  return {
+    name: 'desktop.click',
+    description:
+      'Click a control inside a window — a last resort for the control that has nothing prefer ' +
+      'to press (see desktop.invoke first). Give an element ref and tree from a recent listing ' +
+      'wherever one exists; a raw (x, y) screen point always asks for confirmation, because what is ' +
+      'under a pixel cannot be checked in advance.',
+    permission: 'write',
+    reversibility: 'reversible',
+    inputSchema: ClickInput,
+    verification: 'explicit',
+    timeoutMs: 30_000,
+    consumesActionBudget: true,
+
+    describeTarget(input): ActionTarget {
+      if (isElementClick(input)) return context.describe(input.handle, input.ref);
+      return { rawCoordinates: true };
+    },
+
+    describeEffect(input): string {
+      if (isElementClick(input)) {
+        const element = context.window(input.handle)?.elements.get(input.ref);
+        const where = context.window(input.handle)?.title;
+        const name = element ? (element.name === '' ? `an unnamed ${element.role}` : `"${element.name}"`) : 'a control';
+        return `Click ${name}${where ? ` in ${where}` : ''}.`;
+      }
+      return `Click the screen at (${input.x}, ${input.y}).`;
+    },
+
+    async execute(input): Promise<ToolResult<ClickResult>> {
+      try {
+        const raw = await sidecar.call('click', { ...input }, 25_000);
+        if (isElementClick(input)) {
+          const result = ClickElementResultSchema.parse(raw);
+          const handle = context.window(input.handle)?.handle ?? input.handle ?? 0;
+          // Whatever was clicked, the listing that produced this ref is now
+          // suspect — same reasoning as `invoke`.
+          if (handle) context.forget(handle);
+          return ok({ ...result, handle });
+        }
+        return ok(ClickPointResultSchema.parse(raw));
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+
+    /** Same three signals as `invoke` for an element click. A raw-point click
+     * has no window to re-read, so the only evidence available at all is
+     * whether a new window appeared. */
+    async verify(input, result): Promise<Verification> {
+      if (!result.success || !result.data) {
+        return verification('not-applicable', 'Nothing was clicked.');
+      }
+
+      if (!isElementClick(input)) {
+        const { newWindows, point } = result.data as ClickPointResult;
+        if (newWindows.length > 0) {
+          return verification('verified', `Clicking (${point[0]}, ${point[1]}) opened a new window.`);
+        }
+        return verification(
+          'unverified',
+          `Clicked (${point[0]}, ${point[1]}). There is no element to re-check, so I cannot confirm ` +
+            `what it did.`,
+        );
+      }
+
+      const { name, role, toggleBefore, toggleAfter, treeBefore, newWindows } =
+        result.data as ClickElementResult;
+      const what = name === '' ? `the ${role}` : `"${name}"`;
+
+      if (toggleBefore !== null && toggleAfter !== null && toggleBefore !== toggleAfter) {
+        return verification('verified', `${what} is now ${toggleAfter}.`);
+      }
+      if (newWindows.length > 0) {
+        return verification('verified', `Clicking ${what} opened a new window.`);
+      }
+      try {
+        const raw = await sidecar.call('snapshot', { handle: (result.data as ClickElementResult & { handle: number }).handle }, 15_000);
+        const fresh = SnapshotSchema.parse(raw);
+        if (fresh.tree !== treeBefore) {
+          return verification('verified', `Clicking ${what} changed what is on screen.`);
+        }
+        return verification(
+          'unverified',
+          `Clicked ${what}. Nothing about the window changed, so I cannot confirm it did anything.`,
+        );
+      } catch (cause) {
+        return verification('unverified', `Clicked ${what}, but could not re-read the window: ${String(cause)}`);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// desktop.type
+// ---------------------------------------------------------------------------
+
+const TypeInput = z
+  .object({
+    ...HandleInput,
+    ref: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'Element to click into first, from a recent listing. Omit to type into whatever already ' +
+          'has keyboard focus.',
+      ),
+    tree: z.string().min(1).optional().describe('Required together with ref, from the same listing.'),
+    text: z.string().describe('The text to type, one keystroke at a time.'),
+  })
+  .strict()
+  .refine((v) => (v.ref === undefined) === (v.tree === undefined), {
+    message: 'ref and tree must be given together, or not at all.',
+  });
+type TypeInput = z.infer<typeof TypeInput>;
+
+const TypeElementResultSchema = z.object({
+  ref: z.number().int(),
+  name: z.string(),
+  role: z.string(),
+  runtimeId: z.string(),
+  requested: z.string(),
+  sent: z.number().int(),
+  cancelled: z.boolean(),
+});
+const TypeFocusedResultSchema = z.object({
+  requested: z.string(),
+  sent: z.number().int(),
+  cancelled: z.boolean(),
+});
+export type TypeResult = z.infer<typeof TypeElementResultSchema> | z.infer<typeof TypeFocusedResultSchema>;
+
+export function createDesktopTypeTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<TypeInput, TypeResult> {
+  return {
+    name: 'desktop.type',
+    description:
+      'Type text by sending real keystrokes — a last resort for the field that has no value to set ' +
+      '(see desktop.setValue first, which is atomic and cannot be interleaved with the user’s own ' +
+      'typing). Give a ref and tree to click into a field first, or omit both to type into whatever ' +
+      'already has keyboard focus.',
+    permission: 'write',
+    reversibility: 'reversible',
+    inputSchema: TypeInput,
+    verification: 'explicit',
+    timeoutMs: 30_000,
+    consumesActionBudget: true,
+
+    describeTarget(input): ActionTarget {
+      return context.describe(input.handle, input.ref);
+    },
+
+    describeEffect(input): string {
+      const preview = truncate(input.text);
+      if (input.ref !== undefined) {
+        const element = context.window(input.handle)?.elements.get(input.ref);
+        const name = element?.name ? `"${element.name}"` : 'a control';
+        return `Click ${name} and type "${preview}".`;
+      }
+      return `Type "${preview}" into whatever currently has keyboard focus.`;
+    },
+
+    async execute(input): Promise<ToolResult<TypeResult>> {
+      try {
+        const raw = await sidecar.call('type', { ...input }, 25_000);
+        if (input.ref !== undefined) {
+          const result = TypeElementResultSchema.parse(raw);
+          const handle = context.window(input.handle)?.handle ?? input.handle ?? 0;
+          if (handle) context.forget(handle);
+          return ok(result);
+        }
+        return ok(TypeFocusedResultSchema.parse(raw));
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+
+    /**
+     * There is no readback: typing exists precisely because the field has no
+     * Value pattern to read from either. `verified` is therefore never a
+     * possible answer — only whether every character was actually sent.
+     */
+    async verify(_input, result): Promise<Verification> {
+      if (!result.success || !result.data) {
+        return verification('not-applicable', 'Nothing was typed.');
+      }
+      const { sent, requested, cancelled } = result.data;
+      if (cancelled) {
+        return verification(
+          'unverified',
+          `Cancelled after sending ${sent} of ${requested.length} characters.`,
+        );
+      }
+      return verification(
+        'unverified',
+        `Sent all ${sent} character(s). There is no way to read the field back to confirm it stuck.`,
+      );
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// desktop.pressKey
+// ---------------------------------------------------------------------------
+
+const PressKeyInput = z
+  .object({
+    keys: z
+      .string()
+      .min(1)
+      .describe('A key or chord, e.g. "Enter", "Tab", "Escape", "Ctrl+A", "Alt+F4".'),
+  })
+  .strict();
+type PressKeyInput = z.infer<typeof PressKeyInput>;
+
+const PressKeyResultSchema = z.object({
+  chord: z.string(),
+  parts: z.array(z.string()),
+});
+type PressKeyResult = z.infer<typeof PressKeyResultSchema>;
+
+export function createDesktopPressKeyTool(sidecar: DesktopSidecar): AgentTool<PressKeyInput, PressKeyResult> {
+  return {
+    name: 'desktop.pressKey',
+    description:
+      'Send a key or key combination — "Enter", "Tab", "Escape", "Ctrl+A", "Alt+F4" — to whatever ' +
+      'currently has keyboard focus. There is no element to target: use desktop.click or ' +
+      'desktop.type first if focus needs to move somewhere specific.',
+    permission: 'write',
+    reversibility: 'reversible',
+    inputSchema: PressKeyInput,
+    verification: 'explicit',
+    timeoutMs: 15_000,
+    consumesActionBudget: true,
+
+    describeEffect(input): string {
+      return `Press ${input.keys}.`;
+    },
+
+    async execute(input): Promise<ToolResult<PressKeyResult>> {
+      try {
+        const raw = await sidecar.call('pressKey', { ...input }, 10_000);
+        return ok(PressKeyResultSchema.parse(raw));
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+
+    /** No target, so no evidence — same honesty rule as `desktop.type`. */
+    async verify(input): Promise<Verification> {
+      return verification(
+        'unverified',
+        `Sent ${input.keys}. There is nothing to re-check without knowing what it was aimed at.`,
+      );
+    },
+  };
+}

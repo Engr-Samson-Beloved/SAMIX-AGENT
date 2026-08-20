@@ -269,6 +269,21 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    * the engine treats as untrusted.
    */
   describeTarget?(input: TInput): ActionTarget;
+
+  /**
+   * True for a tool that sends synthetic mouse or keyboard input rather than
+   * driving a control through its UI Automation pattern (Phase 7 step 4).
+   *
+   * This is the distinction `automation.desktop.maxActionsPerTask` is scoped
+   * to: `desktop.invoke` and `desktop.setValue` call a pattern the control
+   * itself exposes, which cannot run away from the target it was aimed at.
+   * `desktop.click`, `desktop.type` and `desktop.pressKey` inject raw input
+   * that goes wherever the cursor or focus happens to be, so a planner stuck
+   * in a bad loop with one of these can do real, compounding damage in a way
+   * the pattern-based tools structurally cannot. Absent or false means the
+   * budget does not apply.
+   */
+  readonly consumesActionBudget?: boolean;
 }
 
 /** Registry view of a tool, minus the executable parts. Safe to send to the UI. */

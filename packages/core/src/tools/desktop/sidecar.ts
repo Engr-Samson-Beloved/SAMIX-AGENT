@@ -163,6 +163,13 @@ export class DesktopSidecar {
     // usually several levels above the process that asked and none of the
     // processes in between own a window.
     const seedPids = [...(this.options.ownPids?.() ?? [])];
+
+    if (op === 'click' || op === 'type') {
+      // How long to spend interpolating the cursor to its target, from config
+      // rather than hardcoded, so `cursorMoveMs: 0` (headless, tests) reaches
+      // every caller without each tool needing to know the setting exists.
+      return { seedPids, moveMs: this.options.config().cursorMoveMs, ...params };
+    }
     if (op !== 'snapshot') return { seedPids, ...params };
 
     const config = this.options.config();
