@@ -41,10 +41,13 @@ import {
 } from './filesystem/tools.js';
 import { DesktopContext } from './desktop/context.js';
 import {
+  createDesktopClickTool,
   createDesktopFindElementTool,
   createDesktopInvokeTool,
+  createDesktopPressKeyTool,
   createDesktopSetValueTool,
   createDesktopSnapshotTool,
+  createDesktopTypeTool,
 } from './desktop/tools.js';
 import type { DesktopSidecar } from './desktop/sidecar.js';
 import { systemGetInfoTool } from './system/get-info.js';
@@ -221,6 +224,11 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolSet {
       ),
       erase(createDesktopInvokeTool(deps.desktop, context) as unknown as AgentTool<never, never>),
       erase(createDesktopSetValueTool(deps.desktop, context) as unknown as AgentTool<never, never>),
+
+      // --- Phase 7 step 4: synthetic mouse and keyboard, last resort --------
+      erase(createDesktopClickTool(deps.desktop, context) as unknown as AgentTool<never, never>),
+      erase(createDesktopTypeTool(deps.desktop, context) as unknown as AgentTool<never, never>),
+      erase(createDesktopPressKeyTool(deps.desktop, context) as unknown as AgentTool<never, never>),
     ]);
   }
 

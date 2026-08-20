@@ -605,8 +605,8 @@ export function createDesktopClickTool(
         );
       }
 
-      const { name, role, toggleBefore, toggleAfter, treeBefore, newWindows } =
-        result.data as ClickElementResult;
+      const { name, role, toggleBefore, toggleAfter, treeBefore, newWindows, handle } =
+        result.data as ClickElementResult & { handle: number };
       const what = name === '' ? `the ${role}` : `"${name}"`;
 
       if (toggleBefore !== null && toggleAfter !== null && toggleBefore !== toggleAfter) {
@@ -616,7 +616,7 @@ export function createDesktopClickTool(
         return verification('verified', `Clicking ${what} opened a new window.`);
       }
       try {
-        const raw = await sidecar.call('snapshot', { handle: (result.data as ClickElementResult & { handle: number }).handle }, 15_000);
+        const raw = await sidecar.call('snapshot', { handle }, 15_000);
         const fresh = SnapshotSchema.parse(raw);
         if (fresh.tree !== treeBefore) {
           return verification('verified', `Clicking ${what} changed what is on screen.`);
