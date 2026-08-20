@@ -1,0 +1,471 @@
+import { z } from 'zod';
+import {
+  err,
+  ok,
+  verification,
+  type ActionTarget,
+  type AgentTool,
+  type ToolResult,
+  type Verification,
+} from '@samix/shared';
+import type { DesktopContext } from './context.js';
+import { SidecarError, SnapshotSchema, type Snapshot, type SnapshotElement } from './protocol.js';
+import type { DesktopSidecar } from './sidecar.js';
+
+/**
+ * Reading and driving the controls inside a window (Phase 7 §4, step 3).
+ *
+ * ## Elements first, coordinates last
+ *
+ * Everything here addresses a control by identity — its place in a tree the
+ * agent has read — never by screen position. A coordinate is a guess about what
+ * is under a pixel; an element reference is a claim about a specific button,
+ * and it can be checked. Coordinates arrive in step 4 and always confirm.
+ *
+ * ## The stale-ref guard
+ *
+ * Every action carries the `tree` hash of the snapshot that produced its `ref`.
+ * The sidecar re-reads the window and refuses with `STALE_REF` if the hash has
+ * moved. This is enforced there rather than here on purpose: it must hold for
+ * every caller, including a future one that does not go through these tools.
+ *
+ * A `ref` is an index. A UI that has shifted renumbers it, and acting on the old
+ * number does not fail — it succeeds, on the wrong control. Nothing downstream
+ * catches that: the click worked, the verifier sees a click, and the only
+ * evidence is a message sent to the wrong person.
+ *
+ * ## Why these declare `reversible`
+ *
+ * This is a deliberate decision and it deserves to be visible rather than
+ * buried. §5 requires that these run without a prompt inside a *trusted*
+ * application in CONTROLLED mode, and the permission engine only lets `write`
+ * through unprompted when it is declared reversible. So `reversible` is what
+ * that table means.
+ *
+ * It is not a claim that every button press can be undone — plainly it cannot.
+ * The protection is not this flag; it is the three things layered above it, none
+ * of which the flag can weaken:
+ *
+ *   · an untrusted or unrecognised application confirms, always;
+ *   · an element whose name reads as send/delete/pay/submit/… confirms, in every
+ *     mode including autonomous, and quotes the element's own words back;
+ *   · the agent's own window is refused outright.
+ *
+ * If that trade is wrong, the fix is to change this to `unknown` — which makes
+ * every desktop action confirm everywhere — and not to weaken any of the three.
+ */
+
+const HandleInput = {
+  handle: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      'Window handle from window.list. Omit to use the window the user is currently looking at.',
+    ),
+};
+
+/** Turn a sidecar failure into a tool result the planner can branch on. */
+function fromSidecar(cause: unknown): ToolResult<never> {
+  if (cause instanceof SidecarError) {
+    return err(cause.code, cause.message, {
+      recoverable: cause.recoverable,
+      ...(cause.details ? { details: cause.details } : {}),
+    });
+  }
+  return err('INTERNAL_ERROR', String(cause), { recoverable: false });
+}
+
+// ---------------------------------------------------------------------------
+// desktop.snapshot
+// ---------------------------------------------------------------------------
+
+const SnapshotInput = z
+  .object({
+    ...HandleInput,
+    maxDepth: z.number().int().min(1).max(64).optional(),
+    maxNodes: z.number().int().min(1).max(2000).optional(),
+  })
+  .strict();
+type SnapshotInput = z.infer<typeof SnapshotInput>;
+
+export interface SnapshotResult {
+  readonly window: string;
+  readonly handle: number;
+  readonly application: string;
+  /** The staleness token. Every action on this window must carry it back. */
+  readonly tree: string;
+  readonly elementCount: number;
+  readonly truncated: boolean;
+  /** The flat, indexed listing. This is what the planner reads. */
+  readonly text: string;
+}
+
+export function createDesktopSnapshotTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<SnapshotInput, SnapshotResult> {
+  return {
+    name: 'desktop.snapshot',
+    description:
+      'Read the controls inside a window — its buttons, text fields, checkboxes and labels — as a ' +
+      'numbered list. Use this before acting on anything in a desktop application, because every ' +
+      'action needs an element number and the tree hash from this listing. The result may be ' +
+      'truncated on a large window, which is normal and is reported. For a web page use the browser ' +
+      'tools instead: a browser window exposes its own toolbar here, not the page inside it.',
+    permission: 'read',
+    reversibility: 'reversible',
+    inputSchema: SnapshotInput,
+    verification: 'intrinsic',
+    timeoutMs: 30_000,
+
+    async execute(input): Promise<ToolResult<SnapshotResult>> {
+      try {
+        const raw = await sidecar.call('snapshot', { ...input }, 25_000);
+        const snapshot = SnapshotSchema.parse(raw);
+        context.remember(snapshot);
+        return ok(summarise(snapshot));
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+  };
+}
+
+function summarise(snapshot: Snapshot): SnapshotResult {
+  return {
+    window: snapshot.window.title,
+    handle: snapshot.window.handle,
+    application: snapshot.window.processName,
+    tree: snapshot.tree,
+    elementCount: snapshot.nodeCount,
+    truncated: snapshot.truncated,
+    text: snapshot.text,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// desktop.findElement
+// ---------------------------------------------------------------------------
+
+const FindInput = z
+  .object({
+    ...HandleInput,
+    query: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Text to look for in a control’s name or value, e.g. "Send" or "Search".'),
+    role: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Restrict to one kind of control, e.g. "Button", "Edit", "CheckBox", "ListItem".'),
+    actionableOnly: z
+      .boolean()
+      .optional()
+      .describe('Only controls that can be pressed, toggled, selected or typed into.'),
+    limit: z.number().int().min(1).max(50).optional(),
+  })
+  .strict();
+type FindInput = z.infer<typeof FindInput>;
+
+const FindResultSchema = z.object({
+  tree: z.string(),
+  window: SnapshotSchema.shape.window,
+  truncated: z.boolean(),
+  matchCount: z.number().int(),
+  exactCount: z.number().int(),
+  elements: z.array(SnapshotSchema.shape.elements.element),
+});
+
+export interface FindResult {
+  readonly tree: string;
+  readonly handle: number;
+  readonly application: string;
+  readonly matchCount: number;
+  readonly exactCount: number;
+  readonly matches: ReadonlyArray<{
+    readonly ref: number;
+    readonly role: string;
+    readonly name: string;
+    readonly value: string | null;
+    readonly enabled: boolean;
+    readonly can: readonly string[];
+  }>;
+}
+
+export function createDesktopFindElementTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<FindInput, FindResult> {
+  return {
+    name: 'desktop.findElement',
+    description:
+      'Find controls inside a window by name, by kind, or both — a quicker and much smaller answer ' +
+      'than reading the whole window when you already know what you are looking for. Returns element ' +
+      'numbers and the tree hash needed to act on them. Exact name matches are listed first.',
+    permission: 'read',
+    reversibility: 'reversible',
+    inputSchema: FindInput,
+    verification: 'intrinsic',
+    timeoutMs: 30_000,
+
+    async execute(input): Promise<ToolResult<FindResult>> {
+      try {
+        const raw = await sidecar.call('findElement', { ...input }, 25_000);
+        const found = FindResultSchema.parse(raw);
+
+        // Remembered so a following action can be judged without another read.
+        // Only the matches are known here, which is enough: an action can only
+        // name a ref this search returned.
+        context.remember({ window: found.window, tree: found.tree, elements: found.elements });
+
+        return ok({
+          tree: found.tree,
+          handle: found.window.handle,
+          application: found.window.processName,
+          matchCount: found.matchCount,
+          exactCount: found.exactCount,
+          matches: found.elements.map((element: SnapshotElement) => ({
+            ref: element.ref,
+            role: element.role,
+            name: element.name,
+            value: element.value,
+            enabled: element.enabled,
+            can: element.patterns,
+          })),
+        });
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// desktop.invoke
+// ---------------------------------------------------------------------------
+
+const ActionInput = {
+  ...HandleInput,
+  ref: z
+    .number()
+    .int()
+    .positive()
+    .describe('The element number from desktop.snapshot or desktop.findElement.'),
+  tree: z
+    .string()
+    .min(1)
+    .describe(
+      'The tree hash from the same listing that gave you the element number. Required: it proves ' +
+        'the window has not changed since you read it.',
+    ),
+};
+
+const InvokeInput = z.object(ActionInput).strict();
+type InvokeInput = z.infer<typeof InvokeInput>;
+
+const InvokeResultSchema = z.object({
+  ref: z.number().int(),
+  name: z.string(),
+  role: z.string(),
+  runtimeId: z.string(),
+  how: z.string(),
+  toggleBefore: z.string().nullable(),
+  toggleAfter: z.string().nullable(),
+  treeBefore: z.string(),
+  treeAfter: z.string(),
+  treeChanged: z.boolean(),
+  newWindows: z.array(z.number().int()),
+});
+type InvokeRaw = z.infer<typeof InvokeResultSchema>;
+
+export interface InvokeResult extends InvokeRaw {
+  readonly handle: number;
+}
+
+export function createDesktopInvokeTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<InvokeInput, InvokeResult> {
+  return {
+    name: 'desktop.invoke',
+    description:
+      'Press a control inside a window — a button, a menu item, a checkbox, a list or tab item. ' +
+      'Needs the element number and tree hash from a listing you have just taken. Prefer this over ' +
+      'clicking a position: it targets the control itself, so it cannot land on the wrong thing if ' +
+      'the window has moved.',
+    permission: 'write',
+    // See the note at the top of this file. This is what §5's table requires,
+    // and the real protection is the trust axis and the dangerous-name floor.
+    reversibility: 'reversible',
+    inputSchema: InvokeInput,
+    verification: 'explicit',
+    timeoutMs: 30_000,
+
+    describeTarget(input): ActionTarget {
+      return context.describe(input.handle, input.ref);
+    },
+
+    describeEffect(input): string {
+      const element = context.window(input.handle)?.elements.get(input.ref);
+      const where = context.window(input.handle)?.title;
+      if (!element) return 'Press a control in a window I have not read recently.';
+      const name = element.name === '' ? `an unnamed ${element.role}` : `"${element.name}"`;
+      return `Press ${name}${where ? ` in ${where}` : ''}.`;
+    },
+
+    async execute(input): Promise<ToolResult<InvokeResult>> {
+      try {
+        const raw = await sidecar.call('invoke', { ...input }, 25_000);
+        const result = InvokeResultSchema.parse(raw);
+        const handle = context.window(input.handle)?.handle ?? input.handle ?? 0;
+        // Whatever was pressed, the listing that produced this ref is now
+        // suspect. Forgetting it forces a fresh read before the next action
+        // rather than letting a second action ride on a pre-click view.
+        if (handle) context.forget(handle);
+        return ok({ ...result, handle });
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+
+    /**
+     * Re-observe, and accept only the deltas §6 names.
+     *
+     * Three signals, because one is not enough: pressing a checkbox flips its
+     * state without changing the structure hash at all — measured, not assumed —
+     * and opening a dialog creates a window rather than altering this one.
+     *
+     * No detectable delta is `unverified`. Never `failed`: plenty of buttons do
+     * something real that leaves no trace in this window. Never `verified`
+     * either — the whole point is that we did not see it happen.
+     */
+    async verify(input, result): Promise<Verification> {
+      if (!result.success || !result.data) {
+        return verification('not-applicable', 'Nothing was pressed.');
+      }
+      const { name, role, toggleBefore, toggleAfter, treeBefore, newWindows } = result.data;
+      const what = name === '' ? `the ${role}` : `"${name}"`;
+
+      if (toggleBefore !== null && toggleAfter !== null && toggleBefore !== toggleAfter) {
+        return verification('verified', `${what} is now ${toggleAfter}.`);
+      }
+      if (newWindows.length > 0) {
+        return verification('verified', `Pressing ${what} opened a new window.`);
+      }
+
+      // Read the window again now, rather than trusting the reading the sidecar
+      // took immediately after the click: a slow dialog may have appeared since.
+      try {
+        const raw = await sidecar.call('snapshot', { handle: input.handle }, 15_000);
+        const fresh = SnapshotSchema.parse(raw);
+        if (fresh.tree !== treeBefore) {
+          return verification('verified', `Pressing ${what} changed what is on screen.`);
+        }
+        return verification(
+          'unverified',
+          `Pressed ${what}. Nothing about the window changed, so I cannot confirm it did anything.`,
+        );
+      } catch (cause) {
+        return verification('unverified', `Pressed ${what}, but could not re-read the window: ${String(cause)}`);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// desktop.setValue
+// ---------------------------------------------------------------------------
+
+const SetValueInput = z
+  .object({
+    ...ActionInput,
+    text: z.string().describe('The text to put in the field. Replaces whatever is there.'),
+  })
+  .strict();
+type SetValueInput = z.infer<typeof SetValueInput>;
+
+const SetValueResultSchema = z.object({
+  ref: z.number().int(),
+  name: z.string(),
+  role: z.string(),
+  runtimeId: z.string(),
+  requested: z.string(),
+  valueBefore: z.string().nullable(),
+  valueAfter: z.string().nullable(),
+  matches: z.boolean(),
+});
+type SetValueRaw = z.infer<typeof SetValueResultSchema>;
+
+export type SetValueResult = SetValueRaw;
+
+export function createDesktopSetValueTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<SetValueInput, SetValueResult> {
+  return {
+    name: 'desktop.setValue',
+    description:
+      'Put text into a field inside a window, replacing what is there. Needs the element number and ' +
+      'tree hash from a listing you have just taken. This sets the field directly rather than typing ' +
+      'into it, so it cannot be interleaved with what the user is typing and cannot half-complete.',
+    permission: 'write',
+    reversibility: 'reversible',
+    inputSchema: SetValueInput,
+    verification: 'explicit',
+    timeoutMs: 30_000,
+
+    describeTarget(input): ActionTarget {
+      return context.describe(input.handle, input.ref);
+    },
+
+    describeEffect(input): string {
+      const element = context.window(input.handle)?.elements.get(input.ref);
+      const name = element?.name ? `"${element.name}"` : 'a field';
+      const preview = input.text.length > 60 ? `${input.text.slice(0, 59)}…` : input.text;
+      return `Replace the contents of ${name} with "${preview}".`;
+    },
+
+    async execute(input): Promise<ToolResult<SetValueResult>> {
+      try {
+        const raw = await sidecar.call('setValue', { ...input }, 25_000);
+        return ok(SetValueResultSchema.parse(raw));
+      } catch (cause) {
+        return fromSidecar(cause);
+      }
+    },
+
+    /**
+     * The expected delta is exact and stated in advance: that element's value is
+     * now the text we asked for. Anything else is not a success.
+     */
+    async verify(input, result): Promise<Verification> {
+      if (!result.success || !result.data) {
+        return verification('not-applicable', 'Nothing was typed.');
+      }
+      const { name, valueAfter, requested } = result.data;
+      const where = name === '' ? 'The field' : `"${name}"`;
+
+      if (valueAfter === requested) {
+        return verification('verified', `${where} now contains "${truncate(requested)}".`);
+      }
+      if (valueAfter === null) {
+        return verification('unverified', `${where} would not report its value back.`);
+      }
+      // The field took something other than what was asked for — a length cap, a
+      // format mask, an application rewriting the input. The tool said success;
+      // the world disagrees, and the world wins.
+      return verification(
+        'failed',
+        `${where} contains "${truncate(valueAfter)}", not "${truncate(requested)}".`,
+      );
+    },
+  };
+}
+
+function truncate(text: string, limit = 60): string {
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}

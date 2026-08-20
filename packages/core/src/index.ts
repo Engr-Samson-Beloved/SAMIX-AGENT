@@ -176,7 +176,26 @@ export {
   parseFrame,
 } from './tools/desktop/protocol.js';
 export type { Handshake, Snapshot, SnapshotElement } from './tools/desktop/protocol.js';
+export {
+  createResilientWindowAutomation,
+  createSidecarWindowAutomation,
+  resolveActive,
+} from './tools/desktop/window-automation.js';
+export type {
+  ResilientWindowAutomation,
+  WindowAutomationStatus,
+  WindowPath,
+} from './tools/desktop/window-automation.js';
 export { pythonCandidates, sidecarArgs, sidecarRoot, venvPython } from './tools/desktop/python.js';
+export { DesktopContext, CONTEXT_TTL_MS } from './tools/desktop/context.js';
+export type { RememberedElement, RememberedWindow } from './tools/desktop/context.js';
+export {
+  createDesktopFindElementTool,
+  createDesktopInvokeTool,
+  createDesktopSetValueTool,
+  createDesktopSnapshotTool,
+} from './tools/desktop/tools.js';
+export { dangerousWordIn } from './security/permissions.js';
 export type { PythonCandidate, PythonSource } from './tools/desktop/python.js';
 
 export { RpcRouter } from './rpc/router.js';

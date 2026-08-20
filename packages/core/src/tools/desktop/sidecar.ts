@@ -157,15 +157,21 @@ export class DesktopSidecar {
 
   /** Fill in the bounds every op honours, from config rather than from code. */
   private withDefaults(op: string, params: Record<string, unknown>): Record<string, unknown> {
-    if (op !== 'snapshot') return params;
+    // Every op that looks at windows needs to know which of them are the
+    // agent's own. It is a seed, not the answer: the sidecar walks up the
+    // process tree from here, because the window the agent appears to live in is
+    // usually several levels above the process that asked and none of the
+    // processes in between own a window.
+    const seedPids = [...(this.options.ownPids?.() ?? [])];
+    if (op !== 'snapshot') return { seedPids, ...params };
+
     const config = this.options.config();
-    const ownPids = this.options.ownPids?.() ?? [];
     return {
+      seedPids,
       maxDepth: config.maxDepth,
       maxNodes: config.maxNodes,
       timeoutMs: config.snapshotTimeoutMs,
       includeOffscreen: config.includeOffscreen,
-      excludePids: [...ownPids],
       ...params,
     };
   }
@@ -244,15 +250,21 @@ export class DesktopSidecar {
           ...sidecarArgs(),
         ]);
         if (!handshake.uia) {
-          // It answers, but it cannot do the one thing it exists for. Trying the
-          // next interpreter would not help — UI Automation is a property of the
-          // machine, not of the Python — so this degrades rather than continuing
-          // the loop, and does it once with a readable reason instead of letting
-          // every later call fail separately.
-          this.degrade(
-            `Python ${handshake.python} started, but UI Automation is unavailable: ${handshake.uiaDetail}`,
+          // This interpreter runs but cannot reach UI Automation — almost always
+          // because `uiautomation` is not installed in it.
+          //
+          // That is a fact about the INTERPRETER, not about the machine. An
+          // earlier version treated it as the latter and degraded the whole
+          // session on the spot, which meant one unsuitable Python on PATH could
+          // permanently disable a sidecar that the bundled virtual environment
+          // would have run perfectly. So: record it, kill it, try the next
+          // candidate. Only when every candidate is unsuitable is that a fact
+          // about the machine.
+          throw new SidecarError(
+            'UNSUPPORTED_PLATFORM',
+            `UI Automation is unavailable: ${handshake.uiaDetail}`,
+            true,
           );
-          throw new SidecarError('UNSUPPORTED_PLATFORM', this.detail, false);
         }
         this.handshake = handshake;
         this.source = candidate.source;

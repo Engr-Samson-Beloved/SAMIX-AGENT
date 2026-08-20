@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { closeSync, openSync } from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import type { AppRegistry, DiscoveredApp } from '../apps/app-registry.js';
@@ -129,10 +130,42 @@ export class BrowserSession {
   private profileNote(): string | undefined {
     if (this.profile !== 'samix') return undefined;
     return (
-      `This is the agent's own browser profile, not your everyday one — Chrome will not enable ` +
-      `remote control on its default profile, so anything you are signed into normally will be ` +
-      `signed out here until you sign in once.`
+      `This is the agent's own browser profile, not your everyday one. Chrome 136 and later ` +
+      `refuse remote control on the default profile outright, so there is no way to drive the ` +
+      `browser you are normally signed into — this profile is the alternative, and it remembers ` +
+      `a sign-in permanently. Sign in once here and it will stay signed in. Until then expect ` +
+      `logged-out pages and the occasional CAPTCHA.`
     );
+  }
+
+  /**
+   * Is a browser already running on the agent's own profile directory?
+   *
+   * This distinguishes the two cases that both look like "something is listening
+   * on the debug port": the user's own Chrome started with the flag, and the
+   * agent's fallback browser left over from an earlier session.
+   *
+   * Getting it wrong is not cosmetic. Attaching to our own leftover browser and
+   * calling it `attached` meant the agent believed it had the user's profile,
+   * suppressed the note above, and quietly ran every search logged out — which
+   * the user discovers when a CAPTCHA appears, not when the agent says so.
+   *
+   * Chrome holds an exclusive handle on `lockfile` for as long as it is running,
+   * so opening it for writing fails while the browser is up and succeeds when
+   * the file is merely left behind. Cheap, synchronous, and no dependency on
+   * enumerating processes.
+   */
+  private ownProfileInUse(): boolean {
+    try {
+      const handle = openSync(path.join(this.options.profileDir, 'lockfile'), 'r+');
+      closeSync(handle);
+      return false;
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException).code;
+      // ENOENT means the profile has never been used. Anything else means the
+      // file exists and something is holding it.
+      return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -189,14 +222,27 @@ export class BrowserSession {
     this.current = undefined;
 
     // --- 1. attach to whatever is already listening -------------------------
+    //
+    // Whose browser it is matters as much as that there is one. A leftover
+    // agent browser from an earlier session listens on exactly the same port as
+    // the user's own, and mistaking the first for the second is how the agent
+    // ends up quietly searching the web logged out.
     if (await this.isPortOpen()) {
-      await this.attach('attached');
+      await this.attach(this.ownProfileInUse() ? 'samix' : 'attached');
       return;
     }
 
     const app = await this.selectBrowser();
 
     // --- 2. launch on the user's real profile -------------------------------
+    //
+    // Chrome 136 and later refuse `--remote-debugging-port` whenever the
+    // user-data-dir is the default one, so on a current Chrome this cannot
+    // succeed and the attempt costs the full startup timeout before falling
+    // through. It is kept because it still works on older builds and on some
+    // Edge and Brave versions, but it is skipped when the browser is already
+    // running on that profile — a second launch is forwarded to the running
+    // instance, our flags are dropped, and the port never opens.
     const realProfile = expand(REAL_PROFILE_DIRS[app.id] ?? '');
     if (realProfile) {
       this.launch(app, realProfile);

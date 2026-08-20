@@ -55,6 +55,7 @@ import traceback
 from typing import Any, Callable
 
 from . import PROTOCOL_VERSION
+from . import actions
 from . import tree as tree_mod
 from . import winenv
 
@@ -148,6 +149,16 @@ class Server:
         self._ops: dict[str, Callable[[dict[str, Any]], Any]] = {
             "ping": self._op_ping,
             "snapshot": self._op_snapshot,
+            "findElement": self._op_find_element,
+            "invoke": self._op_invoke,
+            "setValue": self._op_set_value,
+            # Ported from the PowerShell path. Same names, same shapes, same
+            # behaviour — see the note at the top of winenv.py.
+            "window.list": self._op_window_list,
+            "window.active": self._op_window_active,
+            "window.focus": self._op_window_focus,
+            "window.close": self._op_window_close,
+            "window.exists": self._op_window_exists,
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -294,6 +305,21 @@ class Server:
             data = handler(params)
         except OpError as error:
             self._fail(request_id, error, elapsed_ms(started))
+        except actions.StaleRef as error:
+            # Recoverable, and the planner knows exactly how: take a fresh
+            # snapshot. The current hash goes back with it so the caller can tell
+            # a moved tree from a missing window.
+            self._fail(
+                request_id,
+                OpError(STALE_REF, str(error), tree=error.actual),
+                elapsed_ms(started),
+            )
+        except actions.PatternUnavailable as error:
+            self._fail(
+                request_id, OpError(PATTERN_UNAVAILABLE, str(error)), elapsed_ms(started)
+            )
+        except actions.RefNotFound as error:
+            self._fail(request_id, OpError(ELEMENT_NOT_FOUND, str(error)), elapsed_ms(started))
         except tree_mod.UiaUnavailable as error:
             self._fail(
                 request_id,
@@ -338,16 +364,7 @@ class Server:
         }
 
     def _op_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
-        limits = tree_mod.SnapshotLimits(
-            max_depth=int(params.get("maxDepth", 12)),
-            max_nodes=int(params.get("maxNodes", 400)),
-            timeout_ms=int(params.get("timeoutMs", 2000)),
-            include_offscreen=bool(params.get("includeOffscreen", False)),
-        )
-        if limits.max_depth < 1 or limits.max_nodes < 1 or limits.timeout_ms < 1:
-            raise OpError(INVALID_INPUT, "Snapshot bounds must all be positive.", recoverable=False)
-
-        exclude = frozenset(int(pid) for pid in params.get("excludePids", []) or [])
+        limits = _limits(params)
         handle = params.get("handle")
         scope = params.get("scope", "focused")
         if handle is None and scope not in ("focused",):
@@ -360,7 +377,9 @@ class Server:
                 recoverable=False,
             )
 
-        window = winenv.resolve_window(int(handle) if handle is not None else None, exclude)
+        window = winenv.resolve_window(
+            int(handle) if handle is not None else None, _own(params)
+        )
         if window is None:
             raise OpError(
                 WINDOW_NOT_FOUND,
@@ -373,6 +392,81 @@ class Server:
             raise OpError(USER_CANCELLED, "The snapshot was cancelled.")
         return tree_mod.to_json(snap)
 
+    # --- element ops --------------------------------------------------------
+
+    def _target(self, params: dict[str, Any]):
+        """The window an element op is about, and the bounds for re-reading it."""
+        own = _own(params)
+        handle = params.get("handle")
+        window = winenv.resolve_window(int(handle) if handle is not None else None, own)
+        if window is None:
+            raise OpError(
+                WINDOW_NOT_FOUND,
+                f"No such window: {handle}."
+                if handle is not None
+                else "There are no ordinary windows open on this desktop.",
+            )
+        return window, own, _limits(params)
+
+    def _op_find_element(self, params: dict[str, Any]) -> dict[str, Any]:
+        window, _own_pids, limits = self._target(params)
+        return actions.find_elements(
+            window,
+            limits,
+            query=str(params.get("query", "") or ""),
+            role=str(params.get("role", "") or ""),
+            actionable_only=bool(params.get("actionableOnly", False)),
+            limit=int(params.get("limit", 20)),
+        )
+
+    def _op_invoke(self, params: dict[str, Any]) -> dict[str, Any]:
+        window, own, limits = self._target(params)
+        return actions.invoke(window, own, _ref(params), _tree(params), limits)
+
+    def _op_set_value(self, params: dict[str, Any]) -> dict[str, Any]:
+        window, own, limits = self._target(params)
+        text = params.get("text")
+        if not isinstance(text, str):
+            raise OpError(INVALID_INPUT, "setValue needs the text to set.", recoverable=False)
+        return actions.set_value(window, own, _ref(params), _tree(params), text, limits)
+
+    # --- window ops ---------------------------------------------------------
+    #
+    # These replace a PowerShell process per call. The shapes below are what
+    # `ui-automation.ts` already returns, field for field, because four shipped
+    # tools read them and this step is a port rather than a redesign.
+
+    def _op_window_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        own = _own(params)
+        return {
+            "windows": [w.as_json() for w in winenv.list_windows(own)],
+            "ownPids": sorted(own),
+        }
+
+    def _op_window_active(self, params: dict[str, Any]) -> dict[str, Any]:
+        own = _own(params)
+        foreground = winenv.foreground_handle()
+        windows = winenv.list_windows(own)
+        active = (
+            winenv.describe_window(foreground, own, foreground).as_json()
+            if winenv.is_window(foreground)
+            else None
+        )
+        # The substitution itself is decided on the TypeScript side, from these
+        # two fields, exactly as it is for the PowerShell path. Deciding it here
+        # too would mean two implementations of the rule that stops "close this
+        # window" closing the agent.
+        return {"windows": [w.as_json() for w in windows], "active": active}
+
+    def _op_window_focus(self, params: dict[str, Any]) -> dict[str, Any]:
+        return winenv.focus_window(_handle(params), _own(params))
+
+    def _op_window_close(self, params: dict[str, Any]) -> dict[str, Any]:
+        return winenv.close_window(_handle(params), _own(params))
+
+    def _op_window_exists(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"exists": winenv.window_exists(_handle(params))}
+
     # --- replies ------------------------------------------------------------
 
     def _ok(self, request_id: Any, data: Any, ms: int = 0) -> None:
@@ -384,3 +478,71 @@ class Server:
 
 def elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _own(params: dict[str, Any]) -> frozenset[int]:
+    """Process ids whose windows count as the agent's own.
+
+    Two sources, deliberately. `seedPids` starts an ancestry walk — the agent's
+    window is usually several levels above the process that asked, and none of
+    the processes in between own one. `excludePids` is an explicit additional
+    set, which is what lets a test prove that naming a handle does not defeat the
+    exclusion.
+    """
+    seed = [int(pid) for pid in params.get("seedPids", []) or []]
+    own = set(winenv.own_process_ids(seed))
+    own.update(int(pid) for pid in params.get("excludePids", []) or [])
+    return frozenset(own)
+
+
+def _limits(params: dict[str, Any]) -> tree_mod.SnapshotLimits:
+    limits = tree_mod.SnapshotLimits(
+        max_depth=int(params.get("maxDepth", 12)),
+        max_nodes=int(params.get("maxNodes", 400)),
+        timeout_ms=int(params.get("timeoutMs", 2000)),
+        include_offscreen=bool(params.get("includeOffscreen", False)),
+    )
+    if limits.max_depth < 1 or limits.max_nodes < 1 or limits.timeout_ms < 1:
+        raise OpError(INVALID_INPUT, "Snapshot bounds must all be positive.", recoverable=False)
+    return limits
+
+
+def _ref(params: dict[str, Any]) -> int:
+    try:
+        ref = int(params["ref"])
+    except (KeyError, TypeError, ValueError):
+        raise OpError(
+            INVALID_INPUT, "An action needs the ref of the element to act on.", recoverable=False
+        ) from None
+    if ref < 1:
+        raise OpError(INVALID_INPUT, f"Not an element ref: {ref}", recoverable=False)
+    return ref
+
+
+def _tree(params: dict[str, Any]) -> str:
+    """The structure hash of the snapshot that produced the ref.
+
+    Required, with no default. A missing hash is not "check nothing" — it is a
+    caller that has not read the window, and letting it through would make the
+    stale-ref guard optional in exactly the situation it exists for.
+    """
+    tree = params.get("tree")
+    if not isinstance(tree, str) or tree == "":
+        raise OpError(
+            INVALID_INPUT,
+            "An action must carry the tree hash from the snapshot that produced its ref.",
+            recoverable=False,
+        )
+    return tree
+
+
+def _handle(params: dict[str, Any]) -> int:
+    """A window handle is a pointer-sized integer; reject anything that is not."""
+    raw = params.get("handle")
+    try:
+        handle = int(raw)
+    except (TypeError, ValueError):
+        raise OpError(INVALID_INPUT, f"Not a window handle: {raw!r}", recoverable=False) from None
+    if handle <= 0:
+        raise OpError(INVALID_INPUT, f"Implausible window handle: {handle}", recoverable=False)
+    return handle

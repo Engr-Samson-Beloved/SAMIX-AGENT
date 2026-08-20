@@ -19,6 +19,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+dunce = "1"
 
 [profile.release]
 # A local utility that sits in the tray: optimise for size and startup, and

@@ -191,6 +191,15 @@ class Snapshot:
     truncated_reason: str | None
     scanned: int
     elapsed_ms: int
+    #: The live UI Automation elements, aligned with `nodes` by index, so
+    #: `raw[node.ref - 1]` is the element `node` describes.
+    #:
+    #: Retained rather than looked up again later, because "find the element this
+    #: ref meant" and "confirm the tree has not moved" are the same question: a
+    #: snapshot whose hash still matches is, by construction, the same tree with
+    #: the same elements at the same indices. Never serialised — these are COM
+    #: pointers, and they leave this process only as a `ref`.
+    raw: list = field(default_factory=list)
 
 
 class UiaUnavailable(RuntimeError):
@@ -330,7 +339,7 @@ def _bounds(element) -> Bounds:
     return Bounds(int(left), int(top), int(width), int(height))
 
 
-_TOGGLE_STATES = {0: "off", 1: "on", 2: "indeterminate"}
+TOGGLE_STATES = {0: "off", 1: "on", 2: "indeterminate"}
 
 
 def _describe(element, ref: int, depth: int) -> Node:
@@ -360,7 +369,7 @@ def _describe(element, ref: int, depth: int) -> Node:
 
     name = _text(element, P_NAME) or _text(element, P_HELP_TEXT)
     value = _text(element, P_VALUE_VALUE) if has_value else None
-    toggle = _TOGGLE_STATES.get(_cached(element, P_TOGGLE_STATE, -1)) if "toggle" in patterns else None
+    toggle = TOGGLE_STATES.get(_cached(element, P_TOGGLE_STATE, -1)) if "toggle" in patterns else None
 
     return Node(
         ref=ref,
@@ -424,6 +433,7 @@ def snapshot(
     started = time.monotonic()
     deadline = started + limits.timeout_ms / 1000.0
     nodes: list[Node] = []
+    raw: list = []
     scanned = 0
 
     # Two kinds of bound, and conflating them loses most of the tree.
@@ -467,6 +477,7 @@ def snapshot(
                 continue
             if _worth_emitting(node):
                 nodes.append(node)
+                raw.append(child)
                 walk(child, depth + 1, render_depth + 1)
             else:
                 walk(child, depth + 1, render_depth)
@@ -479,6 +490,7 @@ def snapshot(
     return Snapshot(
         window=window,
         nodes=nodes,
+        raw=raw,
         tree=tree_hash(nodes),
         truncated=reason is not None,
         truncated_reason=reason,
@@ -546,36 +558,40 @@ def render(snap: Snapshot) -> str:
     return "\n".join(lines)
 
 
+def node_json(node: Node) -> dict:
+    """One element, as it crosses the process boundary.
+
+    `bounds` is physical pixels. `ref` is an index into the snapshot that
+    produced it and means nothing without that snapshot's `tree` hash.
+    """
+    return {
+        "ref": node.ref,
+        "depth": node.depth,
+        "role": node.role,
+        "name": node.name,
+        "value": node.value,
+        "automationId": node.automation_id,
+        "runtimeId": node.runtime_id,
+        "nativeHandle": node.native_handle,
+        "bounds": node.bounds.as_list(),
+        "enabled": node.enabled,
+        "patterns": node.patterns,
+        "toggle": node.toggle,
+    }
+
+
 def to_json(snap: Snapshot) -> dict:
     return {
-        "window": {
-            "handle": snap.window.handle,
-            "title": snap.window.title,
-            "processName": snap.window.process_name,
-            "processId": snap.window.process_id,
-            "bounds": snap.window.bounds.as_list(),
-        },
+        # The full window record, `isOwn` included. The snapshot path already
+        # refuses to target one of the agent's own windows, so this is always
+        # false today — but the permission engine reads it, and a field that
+        # silently does not exist is a guard that silently does not run.
+        "window": snap.window.as_json(),
         "tree": snap.tree,
         "truncated": snap.truncated,
         "truncatedReason": snap.truncated_reason,
         "nodeCount": len(snap.nodes),
         "scanned": snap.scanned,
-        "elements": [
-            {
-                "ref": node.ref,
-                "depth": node.depth,
-                "role": node.role,
-                "name": node.name,
-                "value": node.value,
-                "automationId": node.automation_id,
-                "runtimeId": node.runtime_id,
-                "nativeHandle": node.native_handle,
-                "bounds": node.bounds.as_list(),
-                "enabled": node.enabled,
-                "patterns": node.patterns,
-                "toggle": node.toggle,
-            }
-            for node in snap.nodes
-        ],
+        "elements": [node_json(node) for node in snap.nodes],
         "text": render(snap),
     }

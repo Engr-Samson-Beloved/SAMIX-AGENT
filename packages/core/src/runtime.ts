@@ -20,6 +20,9 @@ import { PermissionEngine } from './security/permissions.js';
 import { PathPolicy } from './security/path-policy.js';
 import { DevEnvSecretStore, type SecretStore } from './security/secrets.js';
 import { createToolRegistry } from './tools/index.js';
+import { DesktopSidecar } from './tools/desktop/sidecar.js';
+import { createResilientWindowAutomation } from './tools/desktop/window-automation.js';
+import { windowsAutomation } from './tools/windows/tools.js';
 import type { ToolRegistry } from './tools/registry.js';
 
 /**
@@ -119,8 +122,37 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
   // tools read from it: "close this window" falls back to the last application
   // the agent acted on (spec §80).
   const context = new AgentContext();
+
+  // Desktop control sidecar (Phase 7). Constructed here, spawned on first use —
+  // nothing starts a process that can drive the user's mouse just because the
+  // agent booted. The window tools get a resilient wrapper: the sidecar when it
+  // works, the original PowerShell implementation when it does not, and the same
+  // behaviour either way.
+  const desktop = new DesktopSidecar({
+    config: () => config.get().automation.desktop,
+    logger: rootLog,
+    ownPids: () => [process.pid, process.ppid].filter((pid) => typeof pid === 'number' && pid > 0),
+  });
+  const windows = createResilientWindowAutomation({
+    sidecar: desktop,
+    fallback: windowsAutomation,
+    logger: rootLog,
+    onPathChange: (status) => {
+      agentRef.current?.setSubsystem({
+        name: 'windows',
+        status: 'ready',
+        // `status.detail` already names the path it is on, so prefixing it again
+        // produced "PowerShell — PowerShell — …" in /status.
+        detail:
+          status.path === 'sidecar' ? `UI Automation sidecar — ${status.detail}` : status.detail,
+      });
+    },
+  });
+
   const { registry, browser } = createToolRegistry({
     pathPolicy,
+    windows,
+    desktop,
     cacheDir: paths.cacheDir,
     referents: () => {
       const { app } = context.referents;
@@ -257,12 +289,15 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     detail:
       'Playwright over the DevTools protocol: opens, reads, scrolls, clicks and captures real pages',
   });
+  // Reported honestly as "not yet known": the sidecar is not started until a
+  // window tool is used, so claiming either path here would be a guess. The
+  // `onPathChange` hook above corrects this the moment a real call is served.
   agent.setSubsystem({
     name: 'windows',
     status: process.platform === 'win32' ? 'ready' : 'unavailable',
     detail:
       process.platform === 'win32'
-        ? 'list, focus and close desktop windows; read the active window'
+        ? 'list, focus and close desktop windows; the UI Automation sidecar starts on first use'
         : 'window management is implemented for Windows only',
   });
 
@@ -294,6 +329,9 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     // Release the CDP connection, never the browser itself: the user's windows
     // and tabs are theirs, and an agent that closes them on exit has overstepped.
     void browser.dispose();
+    // The sidecar is a child process holding an open pipe. Left running it would
+    // be an orphan with the ability to read the user's screen.
+    void desktop.dispose();
     bus.removeAll();
     audit.close();
     logger.close();

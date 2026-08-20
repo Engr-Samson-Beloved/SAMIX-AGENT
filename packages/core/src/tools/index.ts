@@ -24,7 +24,9 @@ import {
   createWindowCloseTool,
   createWindowFocusTool,
   createWindowListTool,
+  windowsAutomation,
   type ReferentSource,
+  type WindowAutomation,
 } from './windows/tools.js';
 import {
   createCopyTool,
@@ -37,6 +39,14 @@ import {
   createRenameTool,
   createSearchTool,
 } from './filesystem/tools.js';
+import { DesktopContext } from './desktop/context.js';
+import {
+  createDesktopFindElementTool,
+  createDesktopInvokeTool,
+  createDesktopSetValueTool,
+  createDesktopSnapshotTool,
+} from './desktop/tools.js';
+import type { DesktopSidecar } from './desktop/sidecar.js';
 import { systemGetInfoTool } from './system/get-info.js';
 import { createAgentGetStatusTool, type StatusProvider } from './system/get-status.js';
 
@@ -95,6 +105,19 @@ export interface ToolRegistryDeps {
   readonly referents?: ReferentSource;
   /** Injectable so tests never start a browser. */
   readonly browser?: BrowserSession;
+  /**
+   * How the window tools reach `user32`. Defaults to the PowerShell path, which
+   * is what makes the desktop sidecar optional rather than required: the runtime
+   * substitutes a sidecar-backed implementation when one can be started, and
+   * these four tools cannot tell the difference.
+   */
+  readonly windows?: WindowAutomation;
+  /**
+   * The desktop control sidecar. When absent the four element tools are not
+   * registered at all, rather than registered and failing: a capability the
+   * planner never hears about is one it cannot try to use.
+   */
+  readonly desktop?: DesktopSidecar;
 }
 
 export interface ToolSet {
@@ -122,6 +145,7 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolSet {
   const apps = deps.apps ?? new AppRegistry();
   const policy = deps.pathPolicy;
   const referents: ReferentSource = deps.referents ?? ((): Record<string, never> => ({}));
+  const uia: WindowAutomation = deps.windows ?? windowsAutomation;
 
   // One session shared by every browser tool. Two sessions would mean two page
   // handles, and `browser.extractText` would read a page that `browser.goto`
@@ -177,12 +201,28 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolSet {
     ),
     erase(createBrowserCloseTool(browser) as unknown as AgentTool<never, never>),
 
-    // --- Phase 7 (partial): windows on the user's desktop --------------------
-    erase(createWindowListTool(apps) as unknown as AgentTool<never, never>),
-    erase(createScreenGetActiveWindowTool() as unknown as AgentTool<never, never>),
-    erase(createWindowFocusTool(apps, referents) as unknown as AgentTool<never, never>),
-    erase(createWindowCloseTool(apps, referents) as unknown as AgentTool<never, never>),
+    // --- Phase 7: windows on the user's desktop ------------------------------
+    erase(createWindowListTool(apps, uia) as unknown as AgentTool<never, never>),
+    erase(createScreenGetActiveWindowTool(uia) as unknown as AgentTool<never, never>),
+    erase(createWindowFocusTool(apps, referents, uia) as unknown as AgentTool<never, never>),
+    erase(createWindowCloseTool(apps, referents, uia) as unknown as AgentTool<never, never>),
   ]);
+
+  // --- Phase 7: the controls inside those windows --------------------------
+  // Registered only when a sidecar exists. `DesktopContext` is what makes the
+  // permission engine able to answer "which application, and what does the
+  // button say?" synchronously — see context.ts.
+  if (deps.desktop) {
+    const context = new DesktopContext();
+    registry.registerAll([
+      erase(createDesktopSnapshotTool(deps.desktop, context) as unknown as AgentTool<never, never>),
+      erase(
+        createDesktopFindElementTool(deps.desktop, context) as unknown as AgentTool<never, never>,
+      ),
+      erase(createDesktopInvokeTool(deps.desktop, context) as unknown as AgentTool<never, never>),
+      erase(createDesktopSetValueTool(deps.desktop, context) as unknown as AgentTool<never, never>),
+    ]);
+  }
 
   return { registry, browser };
 }

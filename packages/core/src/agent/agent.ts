@@ -207,7 +207,17 @@ export class Agent {
     try {
       this.machine.transition('understanding');
       this.deps.tasks.setStatus('planning');
-      publish(this.deps.bus, { type: 'agent.thinking' });
+      // The note is what the UI shows while nothing else is happening. Planning
+      // against a language model takes seconds, and a silent prompt during them
+      // is indistinguishable from a hung agent — so each phase says what it is
+      // waiting for. These are statements of what the agent is doing, never a
+      // narration of what a model is "thinking": the model's reasoning is not
+      // available here, and inventing a plausible one would be a lie told in the
+      // one place the user is watching most closely.
+      publish(this.deps.bus, {
+        type: 'agent.thinking',
+        note: `working out what to do — ${this.deps.planner.name}`,
+      });
 
       // ---- plan ---------------------------------------------------------
       this.machine.transition('planning');
@@ -368,6 +378,10 @@ export class Agent {
       taskId,
       mode: this.mode,
       automation: { alwaysConfirm: config.automation.alwaysConfirm },
+      // Phase 7 §5: which applications the user has explicitly trusted. Read
+      // fresh from config each step, so editing the list takes effect on the
+      // next action rather than the next restart.
+      security: { trustedApplications: config.security.trustedApplications },
       token: this.token,
       taskApproved: this.taskApproved,
     });
@@ -419,6 +433,10 @@ export class Agent {
 
     this.machine.transition('recovering');
     this.deps.tasks.setStatus('recovering');
+    publish(this.deps.bus, {
+      type: 'agent.thinking',
+      note: 'that step failed — working out what to try instead',
+    });
 
     const recovery = await this.deps.planner.recover?.({
       task: this.requireTask(),
@@ -649,6 +667,8 @@ export class Agent {
 
     if (failed > 0 || unverified > 0) return mechanical;
     if (!this.deps.planner.summarise) return mechanical;
+
+    publish(this.deps.bus, { type: 'agent.thinking', note: 'writing up what happened' });
 
     try {
       const written = await this.deps.planner.summarise({

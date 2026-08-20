@@ -68,9 +68,15 @@ impl Sidecar {
 
     /// Launch the core and start the reader threads.
     pub fn start(&self, app: &AppHandle) -> Result<(), String> {
-        let entry = resolve_core_entry(app)?;
+        // Windows canonicalizes to `\\?\`-prefixed verbatim paths, which Node's
+        // CJS loader mishandles as the entry-script argument (it mis-resolves
+        // the main path down to the bare drive root and throws EISDIR). Strip
+        // the prefix back to a normal drive-letter path before spawning.
+        let entry = dunce::simplified(&resolve_core_entry(app)?).to_path_buf();
+        let node = dunce::simplified(&node_executable(app)).to_path_buf();
+        eprintln!("[sidecar] launching {} {}", node.display(), entry.display());
 
-        let mut child = Command::new(node_executable(app))
+        let mut child = Command::new(node)
             .arg(&entry)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -174,21 +180,26 @@ impl Default for Sidecar {
 /// core ships as a resource. Both are checked so `tauri dev` and a packaged
 /// install behave identically.
 fn resolve_core_entry(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Ok(resource) = app.path().resolve("core/main.js", tauri::path::BaseDirectory::Resource) {
-        if resource.exists() {
-            return Ok(resource);
-        }
-    }
-
-    // Development: walk up from the executable to the workspace root.
+    // Development: the workspace layout is authoritative — a resource copy
+    // staged next to the exe (see `bundle.resources` in tauri.conf.json) may
+    // also exist during `cargo run`, but it lacks `node_modules`, so prefer
+    // the live workspace build, which resolves dependencies via pnpm's
+    // workspace symlinks.
     let mut cursor = std::env::current_dir().map_err(|e| e.to_string())?;
     loop {
         let candidate = cursor.join("packages/core/dist/main.js");
-        if candidate.exists() {
+        if candidate.is_file() {
             return Ok(candidate);
         }
         if !cursor.pop() {
             break;
+        }
+    }
+
+    // Packaged build: the core ships as a bundled resource next to the exe.
+    if let Ok(resource) = app.path().resolve("core/main.js", tauri::path::BaseDirectory::Resource) {
+        if resource.is_file() {
+            return Ok(resource);
         }
     }
 

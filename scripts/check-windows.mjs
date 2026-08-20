@@ -26,7 +26,11 @@ if (!fs.existsSync(entry)) {
   process.exit(1);
 }
 
-const { getActiveWindow, listWindows } = await import(pathToFileURL(entry).href);
+const { getActiveWindow, listWindows, DesktopSidecar, createSidecarWindowAutomation } =
+  await import(pathToFileURL(entry).href);
+const { defaultConfig } = await import(
+  pathToFileURL(path.join(root, 'packages', 'shared', 'dist', 'index.js')).href
+);
 
 const green = (s) => `[32m${s}[0m`;
 const red = (s) => `[31m${s}[0m`;
@@ -57,7 +61,7 @@ try {
 
   // The first call pays for the ancestry query; later ones must not.
   const secondStarted = Date.now();
-  await listWindows();
+  const windowsAgain = await listWindows();
   const secondElapsed = Date.now() - secondStarted;
   check(
     'a repeat query is cheaper than the first',
@@ -113,6 +117,109 @@ try {
     'nothing marked as ours is offered as a candidate to act on',
     !windows.some((w) => w.isOwn && w.handle === active?.window.handle),
   );
+
+  // --- the same desktop, through the sidecar (Phase 7 step 2) --------------
+  //
+  // The risk in porting these tools was never speed. It was that the fast path
+  // might describe the desktop *differently* — a different z-order, a different
+  // active window, or a window the agent no longer recognises as its own. So the
+  // two back ends are run against the same real desktop and diffed field by
+  // field, which is a comparison no unit test can make.
+  console.log('');
+  const sidecar = new DesktopSidecar({
+    config: () => defaultConfig().automation.desktop,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    ownPids: () => [process.pid, process.ppid].filter(Boolean),
+  });
+
+  try {
+    const fast = createSidecarWindowAutomation(sidecar);
+
+    const coldStarted = Date.now();
+    await fast.list();
+    const coldElapsed = Date.now() - coldStarted;
+
+    const warmStarted = Date.now();
+    const viaSidecar = await fast.list();
+    const warmElapsed = Date.now() - warmStarted;
+
+    check(
+      'the sidecar answers a repeat window.list in well under 500ms',
+      warmElapsed < 500,
+      `${coldElapsed}ms cold, ${warmElapsed}ms warm — PowerShell was ${secondElapsed}ms`,
+    );
+
+    // A window title is live data, not a fact about a back end. Clocks, spinners,
+    // unread counts and progress percentages all change between two reads
+    // seconds apart, and comparing them naively fails against a *correct*
+    // implementation — the first run of this check tripped on the spinner in the
+    // terminal it was running in.
+    //
+    // So volatility is measured rather than assumed: a title that already
+    // differed between the two PowerShell reads is one this comparison has
+    // nothing to say about.
+    const earlier = new Map(windows.map((w) => [w.handle, w]));
+    const volatile = new Set(
+      windowsAgain.filter((w) => earlier.get(w.handle)?.title !== w.title).map((w) => w.handle),
+    );
+
+    const bySidecar = new Map(viaSidecar.map((w) => [w.handle, w]));
+    const fields = ['title', 'processId', 'processName', 'isActive', 'isMinimized', 'isOwn'];
+    const differences = [];
+    for (const a of windowsAgain) {
+      const b = bySidecar.get(a.handle);
+      if (!b) {
+        differences.push(`${a.handle} "${a.title.slice(0, 24)}" is missing from the sidecar`);
+        continue;
+      }
+      for (const field of fields) {
+        if (field === 'title' && volatile.has(a.handle)) continue;
+        if (a[field] !== b[field]) {
+          differences.push(`${a.handle} ${field}: ${JSON.stringify(a[field])} ≠ ${JSON.stringify(b[field])}`);
+        }
+      }
+    }
+
+    check(
+      'both back ends see the same windows, in the same z-order',
+      JSON.stringify(windowsAgain.map((w) => w.handle)) ===
+        JSON.stringify(viaSidecar.map((w) => w.handle)),
+      `${windowsAgain.length} via PowerShell, ${viaSidecar.length} via the sidecar`,
+    );
+    check(
+      'every field of every window matches',
+      differences.length === 0,
+      differences.length > 0
+        ? differences.slice(0, 4).join(' | ')
+        : volatile.size > 0
+          ? `${volatile.size} title(s) changing too fast to compare`
+          : '',
+    );
+    check(
+      'both agree which windows are the agent’s own',
+      windowsAgain.filter((w) => w.isOwn).length === viaSidecar.filter((w) => w.isOwn).length,
+      `${windowsAgain.filter((w) => w.isOwn).length} each`,
+    );
+
+    const fastActive = await fast.active();
+    check(
+      'both resolve the same active window, with the same substitution',
+      fastActive?.window.handle === active?.window.handle &&
+        fastActive?.substituted === active?.substituted,
+      `${fastActive?.window.title.slice(0, 40)} (substituted: ${fastActive?.substituted})`,
+    );
+    check('the sidecar never offers one of ours as active', fastActive?.window.isOwn !== true);
+  } catch (cause) {
+    // Not a failure. The whole point of step 2 is that window management works
+    // without the sidecar; if it cannot start here, that is the fallback doing
+    // its job and the checks above already passed through PowerShell.
+    console.log(
+      `  ${dim('·')} ${dim(`sidecar comparison skipped — ${cause?.message ?? cause}`)}`,
+    );
+    console.log(`  ${dim('  run "pnpm setup:desktop" to build its Python environment')}`);
+  } finally {
+    await sidecar.dispose();
+  }
 } catch (cause) {
   failures += 1;
   console.log(`\n  ${red('✗')} threw: ${cause?.stack ?? String(cause)}`);

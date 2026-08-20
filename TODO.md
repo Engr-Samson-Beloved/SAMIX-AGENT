@@ -22,9 +22,16 @@ These are known gaps in shipped work, not future features.
       `DevEnvSecretStore` reads `GEMINI_API_KEY` from the environment, which it
       refuses to do under `NODE_ENV=production`. Until this lands there is no
       way for a packaged build to hold a key at all.
-- [ ] **esbuild does not run on the primary development machine**, so
-      `vite build` and `vite dev` hang. Diagnosis and remediation in
-      `docs/PHASE-1-REPORT.md`. Not a code defect.
+- [x] ~~**esbuild does not run on the primary development machine.**~~ Fixed, and
+      the long-standing diagnosis was wrong. It was never Defender and no
+      exclusion helped. `@esbuild/win32-x64/esbuild.exe` in the pnpm store was
+      **corrupt**: 533,504 bytes against a correct 11,694,592, and a 32-bit x86
+      PE image inside a package that must hold a 64-bit one. All three Windows
+      esbuild packages contained the *same* wrong file, which is what rules out a
+      platform mismatch and points at the store. A fresh copy of the same version
+      and package runs instantly. `vite build` now completes in 2.2s.
+      *Durable repair:* `pnpm store prune && pnpm install --force`. The note in
+      `docs/PHASE-1-REPORT.md` is superseded and should be corrected in place.
 - [ ] Persist agent mode changes across restarts — currently written to config,
       but confirm behaviour after a crash mid-task.
 - [ ] Crash recovery (spec §67): `runtime-state.json` path is reserved but
@@ -214,19 +221,36 @@ the controls inside a window, but no tool is wired to it yet.**
       Automation loads; COM in a single-threaded apartment; `ping`, `shutdown`,
       `cancel`, `stop`, and a bounded read-only `snapshot`. Lazy spawn, idle
       shutdown, one request in flight, crash-and-respawn to a ceiling of three,
-      then degradation. Measured: 375–545ms warm start, 66ms median snapshot,
-      41MB RSS.
-- [ ] **Step 2 — port the window tools onto it,** keeping `window.list`,
-      `window.focus`, `window.close` and `screen.getActiveWindow` identical in
-      name, schema, confirmation and verification behaviour, with the PowerShell
-      path as the fallback when the sidecar is unavailable. The
-      `WindowAutomation` interface in `windows/tools.ts` is already the seam.
-      *Done when:* a second `window.list` in the same session returns in <500ms,
-      and pulling the sidecar makes the same tools work unchanged and slower.
-      (Today: ~3.4s PowerShell 5.1 startup plus ~1.7s of `Add-Type` per call.)
-- [ ] **Step 3** — `desktop.findElement`, `invoke`, `setValue`, with the
-      stale-ref guard, delta verification, and the trusted-application axis in
-      the permission engine.
+      then degradation. Measured: 0.000% CPU over 300s idle, 41MB RSS, 66ms
+      median snapshot of a small window.
+- [ ] **Start-up is slower than the ~600ms the design assumed.** Six consecutive
+      fresh spawns measured 455/554/670/684/688/898ms — median 684ms — and a
+      genuinely cold start, immediately after a build with Defender scanning the
+      venv, took **8,981ms**. Comfortably inside the tools' 30–40s timeouts, but
+      the first desktop call in a session is something the user will feel, and
+      the argument for lazy spawn rests on that cost being small.
+      *Options:* trim the `uiautomation` import (it does work at import time we
+      do not need), or start the sidecar on the first *window* tool call rather
+      than the first desktop one so the cost lands somewhere already slow.
+      *Done when:* a cold first call is under two seconds on this machine.
+- [x] ~~**Step 2 — port the window tools onto it.**~~ `window.list`,
+      `window.focus`, `window.close` and `screen.getActiveWindow` are unchanged
+      in name, schema, confirmation and verification behaviour; only the back end
+      moved, through the `WindowAutomation` seam. Measured on this machine: a
+      repeat `window.list` went from **1,083ms to 3ms** (361x), and
+      `screen.getActiveWindow` from 1,053ms to 2ms. `pnpm check:windows` now runs
+      both back ends against the real desktop and diffs them field by field.
+      Falling back is per call, not latched, so a transient sidecar failure does
+      not condemn the session to five-second window queries.
+- [x] ~~**Step 3 — `desktop.findElement`, `invoke`, `setValue`.**~~ The
+      stale-ref guard refuses an action whose tree hash is stale or missing
+      before it reaches the sidecar. Verification is by delta, not by echo:
+      `setValue` reads the field back, `invoke` reads the toggle state rather
+      than the structure hash, since most invokes (a plain button) never move
+      it. The honesty rule holds even here — `pnpm check:desktop` presses a
+      button wired to nothing and gets `unverified`, never `verified`.
+      `setValue` on a read-only control is refused with `PATTERN_UNAVAILABLE`.
+      Confirmed live against the fixture window, not just the unit suite.
 - [ ] **Step 4** — mouse and keyboard with interpolated movement, the per-task
       action budget, a queue-draining emergency stop, and the target overlay.
 - [ ] **Step 5** — `screen.capture` and vision as a metered fallback (§16, §18).
@@ -234,6 +258,13 @@ the controls inside a window, but no tool is wired to it yet.**
 - [ ] Emergency stop must release synthetic input — hook is reserved in
       `Agent.emergencyStop()`. `DesktopSidecar.emergencyStop()` exists and drains
       both queues; nothing calls it yet because no input tool exists.
+- [ ] **The equivalence check cannot prove `isOwn` is right, only that both back
+      ends agree.** On this machine both report zero own windows, because of the
+      ConPTY limitation below, so the one field where a port could do real damage
+      is the one field the live diff cannot exercise. The substitution rule
+      itself is unit-tested directly (`resolveActive`), but confirming the
+      ancestry walk needs a machine where the agent's console *is* in its own
+      process tree — a classic `conhost`, or the packaged Tauri build.
 - [ ] **`isOwn` cannot see through ConPTY.** Launch the agent from a terminal
       that hosts the shell over ConPTY and the terminal window is in a different
       process tree, so it is indistinguishable from any other application.
@@ -248,10 +279,13 @@ the controls inside a window, but no tool is wired to it yet.**
       builds its own WinForms window instead (`scripts/lib/desktop-fixture.ps1`).
       Step 4's `pnpm dev:desktop` needs the same treatment, or a way to force a
       genuinely new Notepad process.
-- [ ] **Chrome exposes almost nothing to UI Automation** until a screen reader
-      requests it, so a snapshot of a browser window returns its chrome and not
-      its page. That is fine — the browser has its own DOM-first tools from
-      Phase 6 — but the planner needs to know to prefer them.
+- [ ] **A browser snapshot returns the browser, not the page.** Chrome exposes
+      its own chrome fully — measured at 38 controls including the address bar
+      with its current value — but not page content, which stays behind the
+      accessibility tree until a screen reader asks for it. That is fine: the
+      browser has DOM-first tools from Phase 6. The planner needs to know to
+      prefer them rather than snapshotting a browser window and concluding the
+      page is empty.
 
 ## Phase 8 — WhatsApp
 

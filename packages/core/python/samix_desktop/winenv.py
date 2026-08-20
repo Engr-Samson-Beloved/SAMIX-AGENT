@@ -1,4 +1,4 @@
-"""Win32 environment: DPI, COM, and window enumeration.
+"""Win32 environment: DPI, COM, and window management.
 
 Everything in here is `ctypes` against in-box DLLs. It deliberately does NOT use
 `uiautomation`, because two of its jobs — declaring DPI awareness and enumerating
@@ -18,12 +18,24 @@ target, on the wrong control.
 (system-aware, not per-monitor-v2). Awareness cannot be lowered but the *first*
 successful call wins for the stronger context, so `set_dpi_awareness()` must run
 before that import. `__main__.py` enforces the ordering.
+
+## The window half is a port, not a redesign
+
+`window.list`, `window.focus`, `window.close` and `screen.getActiveWindow` have
+shipped behaviour, and the whole point of this module is to make them fast
+without changing what they do. So the enumeration filters, the ancestry walk and
+its stop list, the ALT-tap before `SetForegroundWindow`, the 150ms settle, and
+posting `WM_CLOSE` rather than forcing it are all reproduced deliberately from
+`tools/windows/ui-automation.ts`. Where this file and that script disagree, this
+file is wrong.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import os
+import time
 from typing import NamedTuple
 
 # --- DPI --------------------------------------------------------------------
@@ -99,7 +111,7 @@ def init_com() -> str:
     raise ComInitError(f"CoInitializeEx failed with 0x{hr & 0xFFFFFFFF:08X}")
 
 
-# --- window enumeration -----------------------------------------------------
+# --- bindings ---------------------------------------------------------------
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -108,6 +120,11 @@ _dwmapi = ctypes.windll.dwmapi
 _GA_ROOTOWNER = 3
 _DWMWA_CLOAKED = 14
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TH32CS_SNAPPROCESS = 0x2
+_SW_RESTORE = 9
+_WM_CLOSE = 0x0010
+_VK_MENU = 0x12
+_KEYEVENTF_KEYUP = 0x2
 
 _EnumProc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 
@@ -120,9 +137,13 @@ _user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 _user32.GetAncestor.argtypes = [wt.HWND, wt.UINT]
 _user32.GetAncestor.restype = wt.HWND
 _user32.GetForegroundWindow.restype = wt.HWND
+_user32.SetForegroundWindow.argtypes = [wt.HWND]
+_user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+_user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 _user32.IsWindowVisible.argtypes = [wt.HWND]
 _user32.IsWindow.argtypes = [wt.HWND]
 _user32.IsIconic.argtypes = [wt.HWND]
+_user32.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD, ctypes.POINTER(wt.ULONG)]
 
 # Handles are pointers. ctypes defaults a foreign function's return type to
 # `c_int`, which truncates a 64-bit HANDLE to 32 bits and yields a value that
@@ -136,6 +157,38 @@ _kernel32.QueryFullProcessImageNameW.argtypes = [
     wt.LPWSTR,
     ctypes.POINTER(wt.DWORD),
 ]
+_kernel32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+_kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+_kernel32.GetConsoleWindow.restype = wt.HWND
+_kernel32.GetProcessTimes.argtypes = [
+    wt.HANDLE,
+    ctypes.POINTER(wt.FILETIME),
+    ctypes.POINTER(wt.FILETIME),
+    ctypes.POINTER(wt.FILETIME),
+    ctypes.POINTER(wt.FILETIME),
+]
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wt.DWORD),
+        ("cntUsage", wt.DWORD),
+        ("th32ProcessID", wt.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wt.DWORD),
+        ("cntThreads", wt.DWORD),
+        ("th32ParentProcessID", wt.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wt.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+_kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+_kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+
+
+# --- values -----------------------------------------------------------------
 
 
 class Bounds(NamedTuple):
@@ -162,6 +215,186 @@ class Window(NamedTuple):
     bounds: Bounds
     is_active: bool
     is_minimised: bool
+    #: True when the window belongs to the agent, to something in its process
+    #: ancestry, or to its attached console. "Close this window" must never mean
+    #: the agent's own window, and this flag is the only thing that honours it.
+    is_own: bool
+
+    def as_json(self) -> dict:
+        return {
+            "handle": self.handle,
+            "title": self.title,
+            "processId": self.process_id,
+            "processName": self.process_name,
+            "bounds": self.bounds.as_list(),
+            "isActive": self.is_active,
+            "isMinimized": self.is_minimised,
+            "isOwn": self.is_own,
+        }
+
+
+# --- process facts ----------------------------------------------------------
+
+
+def _process_table() -> tuple[dict[int, int], dict[int, str]]:
+    """`{pid: parent_pid}` and `{pid: name}` for every process, in one snapshot."""
+    parents: dict[int, int] = {}
+    names: dict[int, str] = {}
+    snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == wt.HANDLE(-1).value:
+        return parents, names
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        if not _kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return parents, names
+        while True:
+            pid = int(entry.th32ProcessID)
+            parents[pid] = int(entry.th32ParentProcessID)
+            name = entry.szExeFile
+            names[pid] = name[:-4] if name.lower().endswith(".exe") else name
+            if not _kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        _kernel32.CloseHandle(snapshot)
+    return parents, names
+
+
+def _create_time(pid: int) -> int:
+    """Process creation time in FILETIME ticks, or 0 when it cannot be read."""
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return 0
+    try:
+        created, exited, kernel, user = (wt.FILETIME() for _ in range(4))
+        if not _kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return 0
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+_name_cache: dict[int, str] = {}
+
+
+def process_name(pid: int) -> str:
+    """Image name without `.exe`, e.g. `chrome`. Empty when access is refused.
+
+    Deliberately uses PROCESS_QUERY_LIMITED_INFORMATION, which succeeds against
+    elevated and protected processes where the older PROCESS_QUERY_INFORMATION
+    does not. A window we cannot name is still a window worth listing.
+
+    Memoised for the life of the process. Process ids are reused, so this can in
+    principle go stale — but a stale *name* only affects how a window is
+    described, never which window is acted on, and the alternative is an
+    OpenProcess round trip per window on every list.
+    """
+    cached = _name_cache.get(pid)
+    if cached is not None:
+        return cached
+
+    name = ""
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if handle:
+        try:
+            size = wt.DWORD(260)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                leaf = buffer.value.rsplit("\\", 1)[-1]
+                name = leaf[:-4] if leaf.lower().endswith(".exe") else leaf
+        finally:
+            _kernel32.CloseHandle(handle)
+    _name_cache[pid] = name
+    return name
+
+
+# Where the walk up the process tree stops.
+#
+# Without a boundary the chain runs all the way to explorer.exe — which owns
+# every File Explorer window — and the agent would decide the user's file manager
+# belonged to it. These are the session hosts that adopt unrelated processes;
+# nothing above them is meaningfully "ours".
+_ANCESTRY_STOPS = frozenset(
+    {
+        "explorer",
+        "services",
+        "svchost",
+        "wininit",
+        "winlogon",
+        "userinit",
+        "csrss",
+        "smss",
+        "system",
+        "idle",
+    }
+)
+
+_own_pids_cache: frozenset[int] | None = None
+
+
+def own_process_ids(seed: list[int]) -> frozenset[int]:
+    """Every process id whose windows count as the agent's own.
+
+    Resolved once per session and cached: a running process does not acquire a
+    new ancestry, and the snapshot is the expensive part.
+
+    A parent-only check is not enough, and that is not hypothetical. Run the
+    agent in Windows Terminal and the chain is
+    `python -> node -> pwsh -> OpenConsole -> WindowsTerminal`, and only the last
+    of those owns a window. Miss it and "close this window" closes the agent's
+    own console.
+    """
+    global _own_pids_cache
+    if _own_pids_cache is not None:
+        return _own_pids_cache
+
+    own: set[int] = {pid for pid in seed if pid > 4}
+    own.add(os.getpid())
+
+    # GetConsoleWindow answers exactly the question being asked — "which window
+    # is my own console?" — and catches the classic conhost case. Kept because it
+    # is direct and cheap, not because it is sufficient.
+    console = _kernel32.GetConsoleWindow()
+    if console:
+        own.add(window_process_id(int(console)))
+
+    parents, names = _process_table()
+
+    # `visited` is separate from `own` on purpose: the seed already contains the
+    # starting id, so reusing `own` for cycle detection would end the walk on its
+    # first iteration and quietly exclude nothing.
+    visited: set[int] = set()
+    current = seed[0] if seed else os.getpid()
+    guard = 0
+    while current > 4 and guard < 32 and current not in visited:
+        visited.add(current)
+        own.add(current)
+        guard += 1
+        parent = parents.get(current)
+        if parent is None or parent <= 4:
+            break
+        name = names.get(parent)
+        if name is None or name.lower() in _ANCESTRY_STOPS:
+            break
+        # Process ids are reused. A "parent" that started after its child is a
+        # different process wearing a dead one's id, and following it would mark
+        # some unrelated application as the agent's own.
+        parent_born, child_born = _create_time(parent), _create_time(current)
+        if parent_born and child_born and parent_born > child_born:
+            break
+        current = parent
+
+    _own_pids_cache = frozenset(pid for pid in own if pid > 0)
+    return _own_pids_cache
+
+
+# --- window facts -----------------------------------------------------------
 
 
 def window_title(handle: int) -> str:
@@ -186,33 +419,15 @@ def window_process_id(handle: int) -> int:
     return int(pid.value)
 
 
-def process_name(pid: int) -> str:
-    """Image name without `.exe`, e.g. `chrome`. Empty when access is refused.
-
-    Deliberately uses PROCESS_QUERY_LIMITED_INFORMATION, which succeeds against
-    elevated and protected processes where the older PROCESS_QUERY_INFORMATION
-    does not. A window we cannot name is still a window worth listing.
-    """
-    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return ""
-    try:
-        size = wt.DWORD(260)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if not _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return ""
-        name = buffer.value.rsplit("\\", 1)[-1]
-        return name[:-4] if name.lower().endswith(".exe") else name
-    finally:
-        _kernel32.CloseHandle(handle)
-
-
 def is_cloaked(handle: int) -> bool:
     """True for DWM-cloaked windows.
 
     Windows 11 keeps a crowd of invisible UWP host windows that pass
     `IsWindowVisible` but are not on screen. Without this check the window list
     is mostly ghosts, and "the window behind ours" resolves to one of them.
+
+    A failing HRESULT means the attribute is unsupported, which is not the same
+    as "cloaked" — treat it as visible.
     """
     value = ctypes.c_int(0)
     hr = _dwmapi.DwmGetWindowAttribute(
@@ -222,74 +437,80 @@ def is_cloaked(handle: int) -> bool:
 
 
 def is_window(handle: int) -> bool:
-    return bool(_user32.IsWindow(handle))
+    return bool(_user32.IsWindow(wt.HWND(handle)))
+
+
+def window_exists(handle: int) -> bool:
+    h = wt.HWND(handle)
+    return bool(_user32.IsWindow(h)) and bool(_user32.IsWindowVisible(h))
 
 
 def foreground_handle() -> int:
     return int(_user32.GetForegroundWindow() or 0)
 
 
-def list_windows(exclude_pids: frozenset[int] = frozenset()) -> list[Window]:
+def describe_window(handle: int, own: frozenset[int], foreground: int) -> Window:
+    pid = window_process_id(handle)
+    return Window(
+        handle=handle,
+        title=window_title(handle),
+        process_id=pid,
+        process_name=process_name(pid),
+        bounds=window_bounds(handle),
+        is_active=handle == foreground,
+        is_minimised=bool(_user32.IsIconic(wt.HWND(handle))),
+        is_own=pid in own,
+    )
+
+
+def list_windows(own: frozenset[int] = frozenset()) -> list[Window]:
     """Ordinary top-level windows, front to back.
 
     `EnumWindows` yields windows in z-order, which is what makes "the window
     behind ours" a meaningful idea and what lets an ambiguous "focus the Chrome
     window" resolve to the frontmost match.
 
-    Filtered out: invisible windows, cloaked windows, untitled windows, windows
-    that are not their own root owner (tool windows and owned dialogs collapse
-    onto their owner), and anything belonging to `exclude_pids`.
+    Filtered out: invisible windows, untitled windows, cloaked windows, and
+    windows that are not their own root owner — GA_ROOTOWNER drops tool windows,
+    owned dialogs and the message-only windows that otherwise dominate the list.
+
+    The agent's own windows are *marked*, not removed. Callers decide: the window
+    tools skip them, while `screen.getActiveWindow` needs to see one in order to
+    report that it substituted the window behind it.
     """
-    active = foreground_handle()
+    foreground = foreground_handle()
     found: list[Window] = []
 
     def callback(handle: wt.HWND, _param: wt.LPARAM) -> bool:
         h = int(handle)
-        if not _user32.IsWindowVisible(h):
+        if not _user32.IsWindowVisible(handle):
             return True
-        if int(_user32.GetAncestor(h, _GA_ROOTOWNER)) != h:
+        if _user32.GetWindowTextLengthW(handle) <= 0:
+            return True
+        if int(_user32.GetAncestor(handle, _GA_ROOTOWNER)) != h:
             return True
         if is_cloaked(h):
             return True
-        title = window_title(h)
-        if not title:
-            return True
-        pid = window_process_id(h)
-        if pid in exclude_pids:
-            return True
-        found.append(
-            Window(
-                handle=h,
-                title=title,
-                process_id=pid,
-                process_name=process_name(pid),
-                bounds=window_bounds(h),
-                is_active=h == active,
-                is_minimised=bool(_user32.IsIconic(h)),
-            )
-        )
+        found.append(describe_window(h, own, foreground))
         return True
 
     _user32.EnumWindows(_EnumProc(callback), 0)
     return found
 
 
-def resolve_window(
-    handle: int | None,
-    exclude_pids: frozenset[int],
-) -> Window | None:
+def resolve_window(handle: int | None, own: frozenset[int]) -> Window | None:
     """The window a snapshot should target.
 
-    With an explicit handle, that window — but still never one belonging to
-    `exclude_pids`, so an agent cannot be pointed at its own console by handle
-    any more than by asking for "the focused window".
+    With an explicit handle, that window — but never one of the agent's own, so
+    it cannot be pointed at its own console by handle any more than by asking for
+    "the focused window".
 
-    With no handle, the foreground window; and if the foreground window is one of
-    ours, the first window behind it that is not. Never the desktop root: walking
-    from the root is unbounded by construction and is the single most expensive
-    mistake available in this API.
+    With no handle, the foreground window; and if that is one of ours, the first
+    window behind it that is not. Never the desktop root: walking from the root is
+    unbounded by construction and is the single most expensive mistake available
+    in this API.
     """
-    windows = list_windows(exclude_pids)
+    windows = [w for w in list_windows(own) if not w.is_own]
     if handle is not None:
         return next((w for w in windows if w.handle == handle), None)
     active = foreground_handle()
@@ -298,20 +519,49 @@ def resolve_window(
     )
 
 
-def own_window_handles(pids: frozenset[int]) -> frozenset[int]:
-    """Top-level window handles belonging to the given processes.
+# --- window actions ---------------------------------------------------------
 
-    Used by the refusal in §5 — an action targeting the agent's own console
-    window is refused, not confirmed — so it must be computed from the same
-    enumeration the rest of this module uses rather than from a title guess.
+
+def focus_window(handle: int, own: frozenset[int]) -> dict:
+    """Bring a window to the front, restoring it first if it is minimised."""
+    target = wt.HWND(handle)
+    if not _user32.IsWindow(target):
+        return {"focused": False, "active": None, "reason": "no-such-window"}
+
+    if _user32.IsIconic(target):
+        _user32.ShowWindow(target, _SW_RESTORE)
+
+    ok = _user32.SetForegroundWindow(target)
+    if not ok:
+        # Windows refuses a foreground change from a process that does not
+        # already own the foreground. Tapping ALT is the documented way to become
+        # eligible; without it, focus silently fails on a machine someone is
+        # actively using.
+        _user32.keybd_event(_VK_MENU, 0, 0, None)
+        _user32.keybd_event(_VK_MENU, 0, _KEYEVENTF_KEYUP, None)
+        ok = _user32.SetForegroundWindow(target)
+
+    # The foreground change is asynchronous; reading it back immediately reports
+    # the previous window and makes a successful focus look like a failure.
+    time.sleep(0.15)
+    now = foreground_handle()
+    return {
+        "focused": now == handle,
+        "active": describe_window(now, own, now).as_json() if is_window(now) else None,
+    }
+
+
+def close_window(handle: int, own: frozenset[int]) -> dict:
+    """Ask a window to close. Posted, never forced.
+
+    `WM_CLOSE` lets the application show its "save changes?" prompt and keep the
+    user's work. A window that stays open is a truthful result, not a failure of
+    this function.
     """
-    handles: set[int] = set()
-
-    def callback(handle: wt.HWND, _param: wt.LPARAM) -> bool:
-        h = int(handle)
-        if window_process_id(h) in pids:
-            handles.add(h)
-        return True
-
-    _user32.EnumWindows(_EnumProc(callback), 0)
-    return frozenset(handles)
+    target = wt.HWND(handle)
+    if not _user32.IsWindow(target):
+        return {"requested": False, "window": None, "reason": "no-such-window"}
+    foreground = foreground_handle()
+    window = describe_window(handle, own, foreground).as_json()
+    requested = bool(_user32.PostMessageW(target, _WM_CLOSE, 0, 0))
+    return {"requested": requested, "window": window}

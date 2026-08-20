@@ -199,7 +199,40 @@ describe('handshake', () => {
     await sidecar.dispose();
   });
 
-  test('degrades when UI Automation is unreachable, without retrying', async () => {
+  test('an interpreter without uiautomation is skipped, not fatal', async () => {
+    // Whether `uiautomation` imports is a property of the interpreter, so the
+    // next candidate is worth trying. One unsuitable Python on PATH must not
+    // disable a sidecar the bundled virtual environment would have run.
+    let attempt = 0;
+    const children: FakeChild[] = [];
+    const sidecar = new DesktopSidecar({
+      config: () => desktopConfig(),
+      logger,
+      spawnFn: ((): any => {
+        const usable = (attempt += 1) > 1;
+        const created = new FakeChild((frame, self) => {
+          if (frame.op === 'ping') {
+            queueMicrotask(() =>
+              self.reply(
+                frame.id,
+                usable ? handshake() : handshake({ uia: false, uiaDetail: "No module named 'uiautomation'" }),
+              ),
+            );
+          } else if (frame.op === 'shutdown') queueMicrotask(() => self.die(0));
+          else self.reply(frame.id, { ok: 1 });
+        });
+        children.push(created);
+        return created;
+      }) as any,
+    });
+
+    assert.deepEqual(await sidecar.call('snapshot'), { ok: 1 });
+    assert.equal(children.length, 2, 'the second candidate was tried');
+    assert.equal(sidecar.status().state, 'ready');
+    await sidecar.dispose();
+  });
+
+  test('degrades when NO interpreter can reach UI Automation', async () => {
     const children: FakeChild[] = [];
     const sidecar = new DesktopSidecar({
       config: () => desktopConfig(),
@@ -224,9 +257,9 @@ describe('handshake', () => {
     });
     assert.equal(sidecar.status().state, 'degraded');
     assert.match(sidecar.status().detail, /COM refused/);
-    // UI Automation is a property of the machine, so a second interpreter
-    // cannot help and must not be tried.
-    assert.equal(children.length, 1);
+    // Every candidate was tried and every one was unsuitable. Only then is this
+    // a fact about the machine rather than about one interpreter.
+    assert.ok(children.length >= 2, 'each candidate interpreter gets a turn');
     assert.equal(sidecar.isUsable(), false);
   });
 
@@ -262,9 +295,19 @@ describe('bounds come from config, not from code', () => {
     assert.equal(params.maxNodes, 25);
     assert.equal(params.timeoutMs, 900);
     assert.equal(params.includeOffscreen, true);
-    // §5: the agent's own windows are never a target, and the sidecar is told
-    // which those are rather than guessing.
-    assert.deepEqual(params.excludePids, [111, 222]);
+    // §5: the agent's own windows are never a target. The sidecar is seeded with
+    // the ids it should walk up from rather than left to guess.
+    assert.deepEqual(params.seedPids, [111, 222]);
+    await sidecar.dispose();
+  });
+
+  test('window ops are seeded too, without the snapshot bounds', async () => {
+    const { sidecar, child } = harness((frame, self) => self.reply(frame.id, {}));
+    await sidecar.call('window.list');
+
+    const params = child().requests[0]!.params;
+    assert.deepEqual(params.seedPids, [111, 222]);
+    assert.equal(params.maxNodes, undefined, 'a window list has no tree to bound');
     await sidecar.dispose();
   });
 
@@ -278,11 +321,11 @@ describe('bounds come from config, not from code', () => {
     await sidecar.dispose();
   });
 
-  test('non-snapshot ops are passed through untouched', async () => {
+  test('non-snapshot ops keep their own arguments untouched', async () => {
     const { sidecar, child } = harness((frame, self) => self.reply(frame.id, {}));
     await sidecar.call('findElement', { query: 'Send' });
 
-    assert.deepEqual(child().requests[0]!.params, { query: 'Send' });
+    assert.equal(child().requests[0]!.params.query, 'Send');
     await sidecar.dispose();
   });
 });

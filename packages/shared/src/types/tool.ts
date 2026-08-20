@@ -158,6 +158,45 @@ export type VerificationStrategy =
    */
   | 'intrinsic';
 
+/**
+ * What an invocation is aimed at (Phase 7 §5).
+ *
+ * Permission was decided from the tool alone until desktop control arrived, and
+ * that stopped being enough: `desktop.invoke` on a Notepad button and
+ * `desktop.invoke` on a button labelled "Transfer" in an unknown application are
+ * the same tool with the same schema and very different consequences.
+ *
+ * Every field is optional and every one of them can only ever make the decision
+ * *stricter*. A tool that cannot describe its target — or a lookup that misses —
+ * yields an empty target, which is treated as the least trusted case rather than
+ * as permission to proceed.
+ */
+export interface ActionTarget {
+  /**
+   * The application being acted on, as `security.trustedApplications` names it.
+   * Absent means "unknown", which is never treated as trusted.
+   */
+  readonly application?: string;
+  /**
+   * The element's name, exactly as the application spells it. Quoted verbatim in
+   * the confirmation prompt: a user approving a click deserves to see the word
+   * on the button, not a paraphrase of it.
+   */
+  readonly elementName?: string;
+  /**
+   * True when the target belongs to the agent itself. Refused outright — not
+   * confirmed — because there is no answer to "shall I close my own console?"
+   * that leaves the session able to report what happened.
+   */
+  readonly ownWindow?: boolean;
+  /**
+   * True when the action names raw screen coordinates instead of an element.
+   * Always confirmed: nothing about a coordinate can be checked beforehand, and
+   * the thing under it at the moment of the click is unknowable in advance.
+   */
+  readonly rawCoordinates?: boolean;
+}
+
 export interface ToolExecutionContext {
   readonly taskId: string;
   readonly stepId: string;
@@ -218,6 +257,18 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    * confirmation prompt (spec §95: "This will permanently delete 184 files…").
    */
   describeEffect?(input: TInput): string;
+
+  /**
+   * What this invocation is aimed at, for the permission engine (Phase 7 §5).
+   *
+   * Synchronous, deliberately. A permission decision must not depend on a round
+   * trip that can hang, time out, or change the world it is asking about. Tools
+   * that need to look something up answer from state they already hold — the
+   * desktop tools read the snapshot the planner must already have taken to
+   * obtain a `ref` at all — and return an empty target when they cannot, which
+   * the engine treats as untrusted.
+   */
+  describeTarget?(input: TInput): ActionTarget;
 }
 
 /** Registry view of a tool, minus the executable parts. Safe to send to the UI. */

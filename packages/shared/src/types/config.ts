@@ -178,8 +178,23 @@ export const SecurityConfigSchema = z.object({
    * committed default is empty rather than a guessed path.
    */
   trustedFolders: z.array(z.string()).default([]),
-  /** Spec §86. Application IDs from the registry, not raw executable paths. */
-  trustedApplications: z.array(z.string()).default([]),
+  /**
+   * Spec §86, Phase 7 §5. Applications the agent may drive without asking
+   * before every click. Matched case-insensitively against either the registry
+   * id or the window's process name.
+   *
+   * Seeded, not discovered. Nothing is ever added here at runtime: an agent that
+   * trusted an application because it had seen it before would be one persuaded
+   * `app.launch` away from trusting whatever it was pointed at. Editing this
+   * list is a decision the user makes, in their own config file.
+   *
+   * The seeds are the four the brief names — a code editor, a browser, the file
+   * manager and a text editor. Note that trust does not disable the floors: a
+   * button reading "Delete" still asks, inside Explorer as anywhere else.
+   */
+  trustedApplications: z
+    .array(z.string())
+    .default(['Code', 'chrome', 'explorer', 'notepad']),
   /**
    * Spec §39. Denied outright; deny always beats trust. Tokens are matched
    * case-insensitively against the normalised absolute path.

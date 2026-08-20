@@ -85,14 +85,63 @@ let closed = false;
 
 const interactive = process.stdin.isTTY === true;
 
+// --- activity indicator ----------------------------------------------------
+//
+// Planning against a language model takes seconds, and a silent prompt during
+// them is indistinguishable from a hung agent. This shows what the agent is
+// waiting for, and how long it has been waiting.
+//
+// It shows the phase the agent reports, never an invented narration of what the
+// model is "thinking" — that is not available here, and making one up in the one
+// place the user is watching most closely would be the worst place to do it.
+const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+let spinner = null;
+
+function startSpinner(label) {
+  if (!interactive || closed) return;
+  if (spinner) {
+    spinner.label = label;
+    return;
+  }
+  spinner = { label, frame: 0, since: Date.now(), timer: null };
+  spinner.timer = setInterval(drawSpinner, 90);
+  spinner.timer.unref?.();
+  drawSpinner();
+}
+
+function drawSpinner() {
+  if (!spinner || closed) return;
+  const seconds = ((Date.now() - spinner.since) / 1000).toFixed(1);
+  const frame = FRAMES[(spinner.frame += 1) % FRAMES.length];
+  readline.cursorTo(process.stdout, 0);
+  readline.clearLine(process.stdout, 0);
+  process.stdout.write(`  ${C.cyan}${frame}${C.reset} ${spinner.label} ${C.dim}${seconds}s${C.reset}`);
+}
+
+function stopSpinner() {
+  if (!spinner) return;
+  clearInterval(spinner.timer);
+  spinner = null;
+  if (interactive && !closed) {
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+  }
+}
+
 /** Print above the prompt without mangling what the user is typing. */
 function say(line) {
+  // The spinner owns the current line. Taking it down before printing and
+  // putting it back afterwards is what keeps a tool result from being written
+  // over a half-drawn frame.
+  const resume = spinner?.label;
+  stopSpinner();
   if (interactive && !closed) {
     readline.cursorTo(process.stdout, 0);
     readline.clearLine(process.stdout, 0);
   }
   process.stdout.write(`${line}\n`);
-  prompt();
+  if (resume !== undefined) startSpinner(resume);
+  else prompt();
 }
 
 function prompt() {
@@ -132,19 +181,26 @@ child.on('exit', (code) => {
 // --- event rendering -------------------------------------------------------
 function render(event) {
   switch (event.type) {
+    case 'agent.thinking':
+      startSpinner(event.note ?? 'thinking');
+      break;
+
     case 'agent.plan.created':
       say(`${C.dim}plan:${C.reset}`);
       for (const step of event.steps) {
         say(`  ${C.dim}${step.index + 1}.${C.reset} ${step.description} ${C.dim}[${step.tool}]${C.reset}`);
       }
+      startSpinner('working through the plan');
       break;
 
     case 'tool.started':
       say(`  ${C.blue}→${C.reset} ${event.tool}`);
+      startSpinner(`running ${event.tool}`);
       break;
 
     case 'tool.completed':
       say(`  ${C.green}✓${C.reset} ${event.tool} ${C.dim}${event.durationMs}ms${C.reset}`);
+      startSpinner(`checking what ${event.tool} did`);
       break;
 
     case 'tool.failed':
@@ -166,27 +222,34 @@ function render(event) {
     case 'confirmation.required': {
       const r = event.request;
       pendingConfirmation = r;
+      // The user has to type. A spinner ticking under a prompt reads as "still
+      // working, please wait", which is the opposite of what is wanted here.
+      stopSpinner();
       say('');
       say(`${C.yellow}${C.bold}CONFIRMATION REQUIRED${C.reset} ${C.dim}(${r.permission})${C.reset}`);
       say(`  ${r.effect}`);
       say(`  ${C.dim}${r.reason}${C.reset}`);
       for (const fact of r.facts) say(`  ${C.dim}${fact.label}:${C.reset} ${fact.value}`);
       say(`  ${C.dim}reply${C.reset} y ${C.dim}=approve,${C.reset} a ${C.dim}=approve rest,${C.reset} n ${C.dim}=decline${C.reset}`);
+      prompt();
       break;
     }
 
     case 'task.completed':
       busy = false;
+      stopSpinner();
       say(`${C.green}agent:${C.reset} ${event.summary}\n`);
       break;
 
     case 'task.failed':
       busy = false;
+      stopSpinner();
       say(`${C.red}agent:${C.reset} ${event.summary} ${C.dim}(${event.error.code})${C.reset}\n`);
       break;
 
     case 'task.cancelled':
       busy = false;
+      stopSpinner();
       say(`${C.yellow}agent:${C.reset} stopped — ${event.reason}\n`);
       break;
 
@@ -238,6 +301,9 @@ async function handle(input) {
     }
     busy = true;
     say(`${C.dim}you: ${line}${C.reset}`);
+    // Started here rather than waiting for the first event, so the gap between
+    // pressing enter and the agent's first word is never silent.
+    startSpinner('thinking');
     await request('task.submit', { instruction: line, source: 'text' });
     return;
   }
@@ -359,8 +425,16 @@ async function handle(input) {
   rl.on('line', (line) => {
     queue = queue
       .then(() => handle(line))
-      .catch((error) => say(`${C.red}${error.message}${C.reset}`))
-      .finally(() => prompt());
+      .catch((error) => {
+        stopSpinner();
+        say(`${C.red}${error.message}${C.reset}`);
+      })
+      // Only re-prompt when nothing is running. Drawing the prompt underneath a
+      // live spinner leaves two cursors on screen and the input line in the
+      // wrong place.
+      .finally(() => {
+        if (!spinner) prompt();
+      });
   });
 
   rl.on('close', () => {

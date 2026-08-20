@@ -5,9 +5,11 @@ import {
   err,
   toToolError,
   verification as makeVerification,
+  type ActionTarget,
   type AgentMode,
   type AutomationConfig,
   type ConfirmationRequest,
+  type SecurityConfig,
   type TaskStep,
   type ToolResult,
   type Verification,
@@ -56,6 +58,8 @@ export interface ExecuteStepContext {
   readonly taskId: string;
   readonly mode: AgentMode;
   readonly automation: Pick<AutomationConfig, 'alwaysConfirm'>;
+  /** Supplies `trustedApplications` for the Phase 7 application-scope axis. */
+  readonly security?: Pick<SecurityConfig, 'trustedApplications'>;
   readonly token: CancellationToken;
   /** True once the user approved the remainder of this task. */
   readonly taskApproved: boolean;
@@ -130,11 +134,30 @@ export class StepExecutor {
     const input = parsed.data as never;
 
     // -- 3. Permission ----------------------------------------------------
+    //
+    // The target is described from the VALIDATED input, so a policy decision is
+    // never made about a shape the tool would have rejected. A tool that throws
+    // while describing its target yields no target at all, which the engine
+    // treats as the least trusted case — a broken describer must not be a way to
+    // skip a confirmation.
+    let target: ActionTarget | undefined;
+    try {
+      target = tool.describeTarget?.(input);
+    } catch (cause) {
+      log.warn('tool could not describe its target; treating it as untrusted', {
+        tool: tool.name,
+        error: String(cause),
+      });
+      target = {};
+    }
+
     const decision = permissions.evaluate({
       tool,
       mode: ctx.mode,
       automation: ctx.automation,
       taskApproved: ctx.taskApproved,
+      ...(target ? { target } : {}),
+      ...(ctx.security ? { security: ctx.security } : {}),
     });
 
     if (decision.effect === 'deny') {
@@ -160,7 +183,7 @@ export class StepExecutor {
         permission: tool.permission,
         effect: tool.describeEffect?.(input) ?? step.description,
         reason: decision.reason,
-        facts: buildFacts(step),
+        facts: buildFacts(step, target),
         requestedAt: new Date().toISOString(),
       };
 
@@ -351,9 +374,19 @@ export class StepExecutor {
  * exactly what is about to happen (spec §95) rather than approving blind.
  * Only top-level scalars: nested structures would make the prompt unreadable.
  */
-function buildFacts(step: TaskStep): Array<{ label: string; value: string }> {
-  if (typeof step.input !== 'object' || step.input === null) return [];
+function buildFacts(
+  step: TaskStep,
+  target?: ActionTarget,
+): Array<{ label: string; value: string }> {
   const facts: Array<{ label: string; value: string }> = [];
+
+  // The target goes first, and quotes the element verbatim. A prompt that says
+  // "ref: 14" is a prompt nobody can evaluate; one that says `element: "Send to
+  // all"` is the whole point of asking.
+  if (target?.elementName) facts.push({ label: 'element', value: `"${target.elementName}"` });
+  if (target?.application) facts.push({ label: 'application', value: target.application });
+
+  if (typeof step.input !== 'object' || step.input === null) return facts;
   for (const [key, value] of Object.entries(step.input as Record<string, unknown>)) {
     if (value === null || value === undefined) continue;
     if (typeof value === 'object') continue;

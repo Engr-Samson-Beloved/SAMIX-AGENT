@@ -85,14 +85,20 @@ export const SnapshotElementSchema = z.object({
 });
 export type SnapshotElement = z.infer<typeof SnapshotElementSchema>;
 
+export const SnapshotWindowSchema = z.object({
+  handle: z.number().int(),
+  title: z.string(),
+  processName: z.string(),
+  processId: z.number().int(),
+  bounds: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+  isActive: z.boolean().optional(),
+  isMinimized: z.boolean().optional(),
+  /** Read by the permission engine: an action on one of ours is refused. */
+  isOwn: z.boolean().optional(),
+});
+
 export const SnapshotSchema = z.object({
-  window: z.object({
-    handle: z.number().int(),
-    title: z.string(),
-    processName: z.string(),
-    processId: z.number().int(),
-    bounds: z.tuple([z.number(), z.number(), z.number(), z.number()]),
-  }),
+  window: SnapshotWindowSchema,
   /** Structure hash. Carried by every action as its stale-ref guard (§4). */
   tree: z.string(),
   /** A truncated snapshot is a legitimate result, never an error (§2). */

@@ -43,7 +43,15 @@ if (!fs.existsSync(entry)) {
 // fixture's handle: the sidecar cannot enumerate windows until step 2, and
 // waiting for the fixture to take *foreground* is not something a check should
 // depend on — the terminal running it usually keeps focus.
-const { DesktopSidecar, SnapshotSchema, listWindows } = await import(pathToFileURL(entry).href);
+const {
+  DesktopSidecar,
+  SnapshotSchema,
+  listWindows,
+  DesktopContext,
+  createDesktopFindElementTool,
+  createDesktopInvokeTool,
+  createDesktopSetValueTool,
+} = await import(pathToFileURL(entry).href);
 const { defaultConfig } = await import(
   pathToFileURL(path.join(root, 'packages', 'shared', 'dist', 'index.js')).href
 );
@@ -228,6 +236,74 @@ try {
     runs.sort((a, b) => a - b);
     check('warm snapshots stay well inside the budget', runs[2] < config.snapshotTimeoutMs,
       `median ${runs[2]}ms of ${config.snapshotTimeoutMs}ms (${runs.join(', ')})`);
+
+    // --- acting on it (Phase 7 step 3) ------------------------------------
+    //
+    // The only writing this check does, and it writes to a window it created
+    // itself, in a process it owns. §69 and §10: never a real application.
+    console.log('');
+    const context = new DesktopContext();
+    const ctx = {
+      taskId: 'check', stepId: 'check', signal: new AbortController().signal,
+      timeoutMs: 20_000, logger: { debug() {}, info() {}, warn() {}, error() {} },
+    };
+    const find = createDesktopFindElementTool(sidecar, context);
+    const invoke = createDesktopInvokeTool(sidecar, context);
+    const setValue = createDesktopSetValueTool(sidecar, context);
+
+    const found = await find.execute({ handle, actionableOnly: true, limit: 30 }, ctx);
+    check('desktop.findElement returns actionable controls', found.success,
+      `${found.data?.matchCount ?? 0} of them, tree=${found.data?.tree}`);
+
+    const tree = found.data.tree;
+    const byName = (name) => found.data.matches.find((m) => m.name === name);
+
+    // setValue, and the exact delta §6 demands: that field now holds that text.
+    const field = byName('Message');
+    const typed = await setValue.execute({ handle, ref: field.ref, tree, text: 'live check ok' }, ctx);
+    const typedVerdict = await setValue.verify({ handle, ref: field.ref, tree, text: 'live check ok' }, typed, ctx);
+    check('desktop.setValue puts text in a field', typed.success && typed.data.matches,
+      `"${typed.data?.valueBefore}" -> "${typed.data?.valueAfter}"`);
+    check('and verifies by reading the value back', typedVerdict.status === 'verified', typedVerdict.detail);
+
+    // invoke on a checkbox: the structure hash does NOT move, so the toggle
+    // signal is the only evidence. This is why §6 needs three of them.
+    const fresh = await find.execute({ handle, query: 'Remember', limit: 5 }, ctx);
+    const box = fresh.data.matches[0];
+    const pressed = await invoke.execute({ handle, ref: box.ref, tree: fresh.data.tree }, ctx);
+    const pressedVerdict = await invoke.verify({ handle, ref: box.ref, tree: fresh.data.tree }, pressed, ctx);
+    check('desktop.invoke toggles a checkbox', pressed.success,
+      `${pressed.data?.toggleBefore} -> ${pressed.data?.toggleAfter}, structure hash ${pressed.data?.treeChanged ? 'changed' : 'unchanged'}`);
+    check('and verifies from the toggle state, not the hash', pressedVerdict.status === 'verified',
+      pressedVerdict.detail);
+
+    // A button that does nothing must be `unverified` — never `verified`, and
+    // never `failed`. This is the honesty rule at its most load-bearing.
+    const inertSearch = await find.execute({ handle, query: 'Cancel', limit: 5 }, ctx);
+    const inert = inertSearch.data.matches[0];
+    const inertArgs = { handle, ref: inert.ref, tree: inertSearch.data.tree };
+    const nothing = await invoke.execute(inertArgs, ctx);
+    const nothingVerdict = await invoke.verify(inertArgs, nothing, ctx);
+    check('a press with no observable effect is unverified, not verified',
+      nothingVerdict.status === 'unverified', nothingVerdict.detail);
+
+    // The stale-ref guard, against a hash that never existed.
+    const stale = await invoke.execute({ handle, ref: 1, tree: 'deadbeef' }, ctx);
+    check('an action on a stale reference is refused',
+      !stale.success && stale.error?.code === 'STALE_REF', stale.error?.message?.slice(0, 70));
+
+    // And the guard is not optional: no hash at all is a rejection too.
+    const noHash = await sidecar.call('invoke', { handle, ref: 1 }, 10_000)
+      .then(() => undefined).catch((e) => e);
+    check('an action with no tree hash at all is refused',
+      noHash?.code === 'INVALID_INPUT', noHash?.message?.slice(0, 60));
+
+    check('setValue on something read-only is refused with PATTERN_UNAVAILABLE',
+      await (async () => {
+        const label = (await find.execute({ handle, query: 'Status', limit: 5 }, ctx)).data.matches[0];
+        const r = await setValue.execute({ handle, ref: label.ref, tree, text: 'x' }, ctx);
+        return !r.success && r.error?.code === 'PATTERN_UNAVAILABLE';
+      })());
   }
 
   // --- idle cost ----------------------------------------------------------
