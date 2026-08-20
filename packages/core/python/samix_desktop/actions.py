@@ -36,7 +36,9 @@ whether a new window appeared.
 from __future__ import annotations
 
 import time
+from typing import Callable
 
+from . import input as input_mod
 from . import tree as tree_mod
 from .tree import Node, SnapshotLimits
 from .winenv import Window
