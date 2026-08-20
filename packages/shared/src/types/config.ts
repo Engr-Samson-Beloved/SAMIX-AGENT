@@ -95,6 +95,65 @@ export const TtsConfigSchema = z.object({
 });
 export type TtsConfig = z.infer<typeof TtsConfigSchema>;
 
+/**
+ * Desktop control sidecar (Phase 7).
+ *
+ * Every bound the sidecar honours lives here rather than in its source, because
+ * a limit hardcoded in a subsystem is a limit nobody can tune when it turns out
+ * to be wrong on a machine we have never seen. The TypeScript client passes
+ * these through on every call; the sidecar has matching defaults only so that
+ * its own modules are constructible in a test.
+ */
+export const DesktopAutomationConfigSchema = z.object({
+  /**
+   * Milliseconds of inactivity before the sidecar is shut down. It costs
+   * nothing while idle — it is blocked on a read — but a process that can drive
+   * the mouse should not outlive the reason it was started. Restarting costs
+   * roughly 400ms, measured.
+   */
+  idleShutdownMs: z.number().int().positive().default(5 * 60_000),
+  /** Deepest level a tree walk will descend. Depth is where cost compounds. */
+  maxDepth: z.number().int().positive().max(64).default(12),
+  /** Hard ceiling on elements returned. Also the token budget for a snapshot. */
+  maxNodes: z.number().int().positive().max(5_000).default(400),
+  /** Wall clock for one tree walk. A hung provider ignores the other bounds. */
+  snapshotTimeoutMs: z.number().int().positive().default(2_000),
+  /**
+   * Include elements the provider reports as offscreen.
+   *
+   * Off by default, and the single most effective bound there is: measured on a
+   * Chrome window, excluding offscreen elements took the walk from 273 nodes and
+   * 476ms to 24 nodes and 46ms, because excluded elements never cross the
+   * process boundary and never cost a recursion. It is configurable because
+   * "offscreen" is a provider's opinion and some applications apply it to
+   * scrolled-but-real content.
+   */
+  includeOffscreen: z.boolean().default(false),
+  /**
+   * Hard ceiling on synthetic input events in one task (Phase 7 §5). On
+   * exhaustion the task FAILS; it does not prompt for more. A budget that can be
+   * topped up by answering a dialog is not a budget, it is a speed bump.
+   */
+  maxActionsPerTask: z.number().int().positive().max(500).default(40),
+  /**
+   * Milliseconds spent interpolating a cursor move. `0` means jump instantly,
+   * for headless and test runs.
+   *
+   * Not only cosmetic: hover menus, tooltips and drag targets need intermediate
+   * WM_MOUSEMOVE messages to fire at all, so a single SetCursorPos is both
+   * invisible to the user and functionally wrong.
+   */
+  cursorMoveMs: z.number().int().nonnegative().max(5_000).default(250),
+  /**
+   * Absolute path to the Python interpreter running the sidecar. Empty means
+   * "resolve it" — see `resolvePython` in tools/desktop.
+   */
+  pythonPath: z.string().default(''),
+  /** Turn the sidecar off entirely and use the PowerShell path for windows. */
+  enabled: z.boolean().default(true),
+});
+export type DesktopAutomationConfig = z.infer<typeof DesktopAutomationConfigSchema>;
+
 export const AutomationConfigSchema = z.object({
   /** Spec §55: default mode is CONTROLLED. */
   mode: AgentModeSchema.default('controlled'),
@@ -108,6 +167,7 @@ export const AutomationConfigSchema = z.object({
   maxStepsPerTask: z.number().int().positive().max(100).default(25),
   maxStepRetries: z.number().int().nonnegative().max(5).default(2),
   taskTimeoutMs: z.number().int().positive().default(300_000),
+  desktop: sectionDefault(DesktopAutomationConfigSchema),
 });
 export type AutomationConfig = z.infer<typeof AutomationConfigSchema>;
 

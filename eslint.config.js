@@ -10,6 +10,10 @@ export default tseslint.config(
     ignores: [
       '**/dist/**',
       '**/node_modules/**',
+      // The desktop sidecar's Python environment. Its site-packages ship a few
+      // stray .js files (comtypes' JScript test fixtures) that are neither ours
+      // nor lintable against this config.
+      'packages/core/python/**',
       '**/src-tauri/target/**',
       '**/src-tauri/gen/**',
       'apps/desktop/dist/**',

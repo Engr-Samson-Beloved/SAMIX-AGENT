@@ -17,6 +17,12 @@ apps/desktop/src/**/*.js.map
 apps/desktop/vite.config.js
 apps/desktop/vite.config.js.map
 
+# Python desktop sidecar (Phase 7). The virtual environment is built on the
+# user's machine by `pnpm setup:desktop`; only requirements.txt is committed.
+packages/core/python/.venv/
+__pycache__/
+*.pyc
+
 # Rust / Tauri
 target/
 apps/desktop/src-tauri/target/

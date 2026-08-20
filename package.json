@@ -30,6 +30,8 @@
     "dev:ui": "pnpm --filter @samix/desktop dev",
     "dev:browser": "pnpm build:packages && node scripts/check-browser.mjs",
     "check:windows": "pnpm build:packages && node scripts/check-windows.mjs",
+    "setup:desktop": "node scripts/setup-desktop.mjs",
+    "check:desktop": "pnpm build:packages && node scripts/check-desktop.mjs",
     "tauri": "pnpm --filter @samix/desktop tauri",
     "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm smoke"
   },

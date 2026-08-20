@@ -308,17 +308,33 @@ is what happens. Offers expire after ten minutes.
 ## 7. Checking it still works
 
 ```powershell
-pnpm verify          # typecheck, lint, 306 tests, stdio smoke test
+pnpm verify          # typecheck, lint, 331 tests, stdio smoke test
 pnpm check:llm       # live end-to-end against the Gemini API
 pnpm check:gemini    # re-confirm model availability before a release
 pnpm dev:browser     # drives a real Chrome through every browser tool
 pnpm check:windows   # read-only; enumerates your actual desktop
+pnpm check:desktop   # read-only; reads the controls inside one window
 ```
 
-The last two run against the real machine on purpose. `pnpm dev:browser` will
-open a browser window; `pnpm check:windows` changes nothing at all. Both caught
-defects the unit suite could not — a search that read the results page before
-the results arrived, and an agent that did not recognise its own console.
+The last three run against the real machine on purpose. `pnpm dev:browser` will
+open a browser window; `pnpm check:windows` changes nothing at all;
+`pnpm check:desktop` opens one small window of its own and closes it again. All
+of them caught defects the unit suite could not — a search that read the results
+page before the results arrived, an agent that did not recognise its own
+console, and a screen-coordinate bug that silently discarded every control in a
+window (see below).
+
+`pnpm check:desktop` needs a Python environment that does not exist until you
+build it:
+
+```powershell
+pnpm setup:desktop        # one-time; creates packages/core/python/.venv
+pnpm check:desktop --idle 300
+```
+
+This is groundwork for the rest of Phase 7 and changes nothing you can ask the
+agent to do yet — see §4. If you never run it, nothing breaks: the window tools
+keep using the PowerShell path they use today.
 
 Run `pnpm check:gemini` periodically regardless — Google retires models without
 warning, and the pinned ones are verified rather than assumed.

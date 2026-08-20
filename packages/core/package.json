@@ -16,7 +16,8 @@
     "samix-core": "./dist/main.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "python"
   ],
   "scripts": {
     "build": "tsc -b",

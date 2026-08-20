@@ -68,6 +68,25 @@ export const TOOL_ERROR_CODES = [
   'TOOL_NOT_FOUND',
   'UNSUPPORTED_PLATFORM',
   'INTERNAL_ERROR',
+  /**
+   * An element reference outlived the snapshot that produced it: the window's
+   * structure hash no longer matches, so the ref may now point at a different
+   * control (Phase 7 §4).
+   *
+   * Distinct from ELEMENT_NOT_FOUND on purpose. "Not found" means the planner
+   * should look again; "stale" means the planner must re-snapshot *before*
+   * looking, because acting on the old view is the failure this code exists to
+   * prevent — and it is the one the verifier cannot catch afterwards, since a
+   * click on the wrong button succeeds.
+   */
+  'STALE_REF',
+  /**
+   * The element exists but does not support the pattern the action needs — a
+   * `setValue` on something with no writable Value pattern, an `invoke` on
+   * something with no Invoke pattern (Phase 7 §4). Recoverable: a different
+   * approach to the same element may work.
+   */
+  'PATTERN_UNAVAILABLE',
 ] as const;
 export const ToolErrorCodeSchema = z.enum(TOOL_ERROR_CODES);
 export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];

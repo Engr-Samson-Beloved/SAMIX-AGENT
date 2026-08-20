@@ -200,21 +200,40 @@ Downloads folder?" is answered from a real search.
 
 ## Phase 7 — Windows UI automation
 
-**Status: windows are covered; the controls inside them are not.**
+**Status: windows are covered. The desktop control sidecar exists and can read
+the controls inside a window, but no tool is wired to it yet.**
 
 - [x] ~~`window.{list,focus,close}` and `screen.getActiveWindow`~~ via `user32`
       P/Invoke through a constant PowerShell script (spec §15).
 - [x] ~~"This window" resolves to the user's active window, never the agent's
       own~~ (spec §13). Walks the process ancestry, stopping before the session
       host so File Explorer is never mistaken for ours.
-- [ ] **A window query costs several seconds.** Measured: ~3.4s PowerShell 5.1
-      startup, ~1.7s `Add-Type` compiling the C#, and the process query on top.
-      The ancestry result is now cached, which removes ~1s from every call after
-      the first, but the startup floor remains. The fix is a **long-lived
-      PowerShell host** fed over stdin, with its own lifecycle, framing and
-      failure modes — a subsystem, not a tweak, and deliberately not smuggled
-      into `ui-automation.ts`.
-      *Done when:* a second `window.list` in the same session returns in <500ms.
+- [x] ~~**Step 1 — the sidecar skeleton.**~~ A long-lived Python process
+      (`packages/core/python/samix_desktop`) speaking NDJSON over stdin/stdout,
+      with `DesktopSidecar` as its client. Per-monitor-v2 DPI declared before UI
+      Automation loads; COM in a single-threaded apartment; `ping`, `shutdown`,
+      `cancel`, `stop`, and a bounded read-only `snapshot`. Lazy spawn, idle
+      shutdown, one request in flight, crash-and-respawn to a ceiling of three,
+      then degradation. Measured: 375–545ms warm start, 66ms median snapshot,
+      41MB RSS.
+- [ ] **Step 2 — port the window tools onto it,** keeping `window.list`,
+      `window.focus`, `window.close` and `screen.getActiveWindow` identical in
+      name, schema, confirmation and verification behaviour, with the PowerShell
+      path as the fallback when the sidecar is unavailable. The
+      `WindowAutomation` interface in `windows/tools.ts` is already the seam.
+      *Done when:* a second `window.list` in the same session returns in <500ms,
+      and pulling the sidecar makes the same tools work unchanged and slower.
+      (Today: ~3.4s PowerShell 5.1 startup plus ~1.7s of `Add-Type` per call.)
+- [ ] **Step 3** — `desktop.findElement`, `invoke`, `setValue`, with the
+      stale-ref guard, delta verification, and the trusted-application axis in
+      the permission engine.
+- [ ] **Step 4** — mouse and keyboard with interpolated movement, the per-task
+      action budget, a queue-draining emergency stop, and the target overlay.
+- [ ] **Step 5** — `screen.capture` and vision as a metered fallback (§16, §18).
+- [ ] **Step 6** — per-application recipes as declarative YAML data.
+- [ ] Emergency stop must release synthetic input — hook is reserved in
+      `Agent.emergencyStop()`. `DesktopSidecar.emergencyStop()` exists and drains
+      both queues; nothing calls it yet because no input tool exists.
 - [ ] **`isOwn` cannot see through ConPTY.** Launch the agent from a terminal
       that hosts the shell over ConPTY and the terminal window is in a different
       process tree, so it is indistinguishable from any other application.
@@ -222,13 +241,17 @@ Downloads folder?" is answered from a real search.
       which *is* the parent. Documented on `WindowInfo.isOwn`; the obvious
       workarounds (matching window titles, or `WindowsTerminal.exe`) would make
       the agent refuse to act on windows that really are the user's.
-- [ ] UI Automation **tree** inspection — controls, buttons, text fields inside a
-      window; prefer controls over coordinates (§15). Windows are the container;
-      this is the contents, and it is what WhatsApp automation will need.
-- [ ] `screen.capture` of the desktop (the browser can capture a page already),
-      `mouse.*`, `keyboard.*` with strict action limits (§16).
-- [ ] Emergency stop must release synthetic input — hook is reserved in
-      `Agent.emergencyStop()`.
+- [ ] **Windows 11 Notepad is unusable as a live-write fixture.** It is a
+      single-instance tabbed Store app, so "launch a Notepad and close it
+      afterwards" actually means "add a tab to the user's session, then kill the
+      whole application with their unsaved work in it". `pnpm check:desktop`
+      builds its own WinForms window instead (`scripts/lib/desktop-fixture.ps1`).
+      Step 4's `pnpm dev:desktop` needs the same treatment, or a way to force a
+      genuinely new Notepad process.
+- [ ] **Chrome exposes almost nothing to UI Automation** until a screen reader
+      requests it, so a snapshot of a browser window returns its chrome and not
+      its page. That is fine — the browser has its own DOM-first tools from
+      Phase 6 — but the planner needs to know to prefer them.
 
 ## Phase 8 — WhatsApp
 

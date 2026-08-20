@@ -1,0 +1,13 @@
+# SAMIX desktop sidecar dependencies (Phase 7 §2).
+#
+# Pure-Python prebuilt wheels ONLY. Nothing here may need a compiler on the
+# user's machine, and nothing may be added without asking: the whole point of
+# choosing Python for this sidecar was that mature UIA bindings already exist,
+# not that a package manager is now available.
+#
+# Pinned exactly. A desktop agent that drives someone's machine should behave
+# the same tomorrow as today; a floating dependency is a silent behaviour change
+# on a subsystem whose failures are physical.
+
+uiautomation==2.0.29
+comtypes==1.4.16

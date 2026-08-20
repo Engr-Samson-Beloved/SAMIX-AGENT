@@ -161,6 +161,24 @@ export {
 } from './tools/windows/tools.js';
 export type { ReferentSource, WindowAutomation, WindowReferents } from './tools/windows/tools.js';
 
+// Phase 7 — desktop control sidecar (Windows UI Automation over NDJSON)
+export { DesktopSidecar } from './tools/desktop/sidecar.js';
+export type {
+  DesktopSidecarOptions,
+  SidecarState,
+  SidecarStatus,
+} from './tools/desktop/sidecar.js';
+export {
+  SIDECAR_PROTOCOL_VERSION,
+  SidecarError,
+  HandshakeSchema,
+  SnapshotSchema,
+  parseFrame,
+} from './tools/desktop/protocol.js';
+export type { Handshake, Snapshot, SnapshotElement } from './tools/desktop/protocol.js';
+export { pythonCandidates, sidecarArgs, sidecarRoot, venvPython } from './tools/desktop/python.js';
+export type { PythonCandidate, PythonSource } from './tools/desktop/python.js';
+
 export { RpcRouter } from './rpc/router.js';
 export type { RouterResult } from './rpc/router.js';
 export { StdioTransport } from './transport/stdio.js';
