@@ -764,7 +764,10 @@ const PressKeyResultSchema = z.object({
 });
 type PressKeyResult = z.infer<typeof PressKeyResultSchema>;
 
-export function createDesktopPressKeyTool(sidecar: DesktopSidecar): AgentTool<PressKeyInput, PressKeyResult> {
+export function createDesktopPressKeyTool(
+  sidecar: DesktopSidecar,
+  context: DesktopContext,
+): AgentTool<PressKeyInput, PressKeyResult> {
   return {
     name: 'desktop.pressKey',
     description:
@@ -777,6 +780,16 @@ export function createDesktopPressKeyTool(sidecar: DesktopSidecar): AgentTool<Pr
     verification: 'explicit',
     timeoutMs: 15_000,
     consumesActionBudget: true,
+
+    // No ref to name — a key press has no element of its own — but the most
+    // recently remembered window is still the best available answer to "which
+    // application", and `describe()` already treats a total miss as `{}`,
+    // which the engine reads as the least trusted case. Without this, `target`
+    // would be `undefined` rather than `{}`, and the app-trust axis would skip
+    // this tool entirely instead of falling back to that safe default.
+    describeTarget(): ActionTarget {
+      return context.describe(undefined, undefined);
+    },
 
     describeEffect(input): string {
       return `Press ${input.keys}.`;
