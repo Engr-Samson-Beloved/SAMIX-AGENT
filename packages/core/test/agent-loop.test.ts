@@ -317,6 +317,133 @@ describe('the Phase 1 loop, end to end', () => {
   });
 });
 
+describe('continuation — asking the planner again once results are in (Planner.continue)', () => {
+  /**
+   * `plan()` is one blind turn: the model commits to tool arguments before
+   * anything has run. `Planner.continue` is the orchestrator's hook to show it
+   * real results and ask whether more is needed — without it, nothing that
+   * depends on a prior step's actual output (an element ref, a search id)
+   * could ever be planned correctly. These tests exercise the round loop in
+   * `agent.ts` directly; `llm-planner.test.ts` covers what the LLM planner
+   * puts in the continuation prompt.
+   */
+  it('runs a second round of tool calls after the first succeeds, seeing the real result', async () => {
+    let calls = 0;
+    const rt = build({
+      planner: {
+        name: 'continuing (test)',
+        plan: () => Promise.resolve<PlanResult>(planFor('system.getInfo', 'first read')),
+        continue: (request) => {
+          calls += 1;
+          if (calls === 1) {
+            assert.equal(request.completedSteps.length, 1, 'sees exactly the steps that have run');
+            assert.equal(request.completedSteps[0]?.tool, 'system.getInfo');
+            assert.equal(request.completedSteps[0]?.status, 'succeeded');
+            return Promise.resolve<PlanResult>(planFor('agent.getStatus', 'second read'));
+          }
+          assert.equal(request.completedSteps.length, 2, 'the second round is visible on the next check');
+          return Promise.resolve<PlanResult>({ kind: 'reply', message: '' });
+        },
+      },
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('do two things', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed');
+    const task = rt.tasks.find(taskId);
+    assert.deepEqual(task?.steps.map((s) => s.tool), ['system.getInfo', 'agent.getStatus']);
+    assert.equal(task?.steps[1]?.status, 'succeeded');
+    // Called twice: once producing the second step, once confirming nothing
+    // remained after it — never fewer, never looping forever.
+    assert.equal(calls, 2);
+  });
+
+  it('a planner with no opinion on continuation stops after one round, unchanged from before this existed', async () => {
+    const rt = build({ planner: fixedPlanner(planFor('system.getInfo', 'only read')) });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('one thing', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed');
+    assert.equal(rt.tasks.find(taskId)?.steps.length, 1);
+  });
+
+  it('stops asking once maxContinuationRounds is reached, without failing what already succeeded', async () => {
+    let continues = 0;
+    const rt = build({
+      planner: {
+        name: 'endless (test)',
+        plan: () => Promise.resolve<PlanResult>(planFor('system.getInfo', 'round 0')),
+        continue: () => {
+          continues += 1;
+          return Promise.resolve<PlanResult>(planFor('agent.getStatus', `round ${continues}`));
+        },
+      },
+    });
+    rt.config.update({ automation: { maxContinuationRounds: 2 } });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('keep going', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed', 'a round budget is not a failure — it is a stopping point');
+    const task = rt.tasks.find(taskId);
+    assert.equal(task?.steps.length, 2, 'the initial step plus exactly one continuation round');
+    assert.equal(continues, 1, 'a bound of 2 rounds means exactly one continuation call is made');
+  });
+
+  it('ends the task on a clarifying question raised during continuation', async () => {
+    const rt = build({
+      planner: {
+        name: 'asking (test)',
+        plan: () => Promise.resolve<PlanResult>(planFor('system.getInfo', 'first read')),
+        continue: () => Promise.resolve<PlanResult>({ kind: 'clarify', question: 'Which one did you mean?' }),
+      },
+    });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('do the thing', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed');
+    assert.equal(rt.tasks.find(taskId)?.summary, 'Which one did you mean?');
+  });
+
+  it('stops rather than exceeding the step limit across rounds, keeping what already succeeded', async () => {
+    let continues = 0;
+    const rt = build({
+      planner: {
+        name: 'greedy (test)',
+        plan: () => Promise.resolve<PlanResult>(planFor('system.getInfo', 'round 0')),
+        continue: () => {
+          continues += 1;
+          // Offers far more than could ever fit under the step limit.
+          return Promise.resolve<PlanResult>({
+            kind: 'steps',
+            steps: Array.from({ length: 50 }, (_, i) => ({
+              description: `extra ${i}`,
+              tool: 'agent.getStatus',
+              input: {},
+            })),
+          });
+        },
+      },
+    });
+    rt.config.update({ automation: { maxStepsPerTask: 3, maxContinuationRounds: 5 } });
+    const { done } = watch(rt);
+    rt.agent.start();
+    const { taskId } = rt.agent.submit('do a lot', 'text');
+
+    const outcome = await done;
+    assert.equal(outcome.type, 'task.completed', 'exceeding the limit stops the loop, it does not fail the task');
+    assert.equal(rt.tasks.find(taskId)?.steps.length, 1, 'only the round that fit within the limit ran');
+    assert.equal(continues, 1, 'asked once, then stopped once the answer could not fit');
+  });
+});
+
 describe('the verification guarantee (spec §29, development rule 25)', () => {
   /**
    * The central promise of the product: when the tool claims success but the

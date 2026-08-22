@@ -6,8 +6,62 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Phases 3 through 7: the agent plans with Google Gemini, acts on the machine, and
-can now **read the web and the desktop back**. 2 tools became 26.
+Phases 3 through 7 and 10: the agent plans with Google Gemini, acts on the
+machine, can now **read the web and the desktop back**, and — new — run its
+own project's toolchain. 2 tools became 38.
+
+### Added — Phase 10: developer tools
+
+- **`terminal.execute`.** One allow-listed development command per call
+  (`git`, `node`, `npm`, `pnpm`, `npx` by default) — never a path, no shell,
+  spawned as `command, args[]`. `permission: 'system'`, so the permission
+  engine confirms every single call, showing the exact command and arguments
+  first, in every mode including AUTONOMOUS. A nonzero exit is data, not a
+  tool failure: running the tests and finding one fails is the tool doing its
+  job.
+- **`git.status`, `git.diff`, `git.log`, `git.branch`.** Dedicated read-only
+  wrappers rather than routed through `terminal.execute` — each is one fixed
+  git subcommand, so it is an unconfirmed read like any other, not a
+  `'system'`-tier call. Confirmed live: "what's the git status of \<repo\>,
+  and what were the last 3 commits" runs both tools in one plan and reports
+  the actual branch and commit hashes.
+- **`CommandPolicy`** (`security/command-policy.ts`), a fresh floor rather
+  than a reuse of `app.launch`'s `NEVER_LAUNCHABLE`. That set blocks
+  `node.exe`/`python.exe`, which is correct for launching a bare GUI-style
+  app with no argument visibility and wrong for a tool where every call is
+  confirmed with its arguments shown — reusing it made the first live test
+  refuse `node --version` outright. `CommandPolicy`'s own floor covers real
+  shells (`cmd`, `powershell`, `bash`, `wsl`, …) and standalone
+  system-management binaries (`reg`, `diskpart`, `shutdown`, `cipher`,
+  `certutil`, …), and no `allowedCommands` configuration can widen past it.
+- All five tools are `availableInModes: ['developer']` — not offered to the
+  planner at all outside DEVELOPER mode.
+
+### Added — multi-round planning (`Planner.continue`)
+
+- **The agent can now actually finish a task that requires reading a desktop
+  control before acting on it.** `plan()` was one blind LLM turn: the model
+  committed to concrete tool arguments before anything had run, which made it
+  structurally impossible to call `desktop.setValue`, `desktop.invoke` or
+  `desktop.click` correctly — their `ref` and `tree` arguments do not exist
+  until a `desktop.snapshot` has actually executed and returned them. Driving
+  the agent with a real typed instruction against a real window surfaced this
+  directly: Gemini called `window.list`, correctly refused to invent a ref it
+  did not have, and the orchestrator reported the task done after that one
+  read — having typed nothing.
+- `Agent.run()` now loops: once a batch of steps all succeed, it goes back to
+  the planner with their real results attached (`Planner.continue`, reusing
+  the conversation-replay shape `recover()` already had for the failure path)
+  and asks whether the task, seen from what actually happened, needs more.
+  Bounded independently of the existing per-task step cap by
+  `automation.maxContinuationRounds` (default 8), since round count is what
+  actually governs LLM round-trips. A planner with no opinion on this (the
+  deterministic fallback) leaves every existing single-round task unchanged.
+- Confirmed live end to end: "type X into the Message field, then check the
+  Remember me box" now runs `window.list` → `desktop.snapshot` →
+  `desktop.setValue` + `desktop.invoke`, the last two using the exact ref and
+  tree hash the snapshot just returned, each verified against real UI state
+  read back afterwards.
 
 ### Added — Phase 6: real browser automation
 

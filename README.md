@@ -4,13 +4,15 @@ A local-first autonomous computer agent for Windows. You speak or type an
 instruction; the agent plans it, executes real operations through explicit
 tools, **verifies that they actually happened**, and reports what it did.
 
-> **Status: Phases 1, 3, 4, 5 and 6 complete; Phase 7 partially.** The runtime,
-> safety model and verification pipeline are built and tested (Phase 1); the
-> agent plans with Google Gemini (Phase 3); and it acts on the machine through
-> 26 tools — files, applications, processes, a real browser it can *read* as
-> well as drive, and the windows on your desktop (Phases 4–7). Still missing:
-> voice (Phase 2), typing into pages and forms (Phase 6), controls inside
-> windows and mouse/keyboard (Phase 7), messaging (Phase 8) and memory that
+> **Status: Phases 1, 3, 4, 5, 6 and 10 complete; Phase 7 mostly.** The
+> runtime, safety model and verification pipeline are built and tested
+> (Phase 1); the agent plans with Google Gemini through a real observe-then-act
+> loop, not a single blind turn (Phase 3); and it acts on the machine through
+> 38 tools — files, applications, processes, a real browser it can *read* as
+> well as drive, the windows on your desktop and the controls inside them, and
+> — DEVELOPER mode only — its own project's toolchain and git (Phases 4–7,
+> 10). Still missing: voice (Phase 2), typing into web forms (Phase 6), a
+> screenshot/vision fallback (Phase 7), messaging (Phase 8) and memory that
 > survives a restart (Phase 9).
 > Start here: **[docs/USING-SAMIX.md](docs/USING-SAMIX.md)**.
 
@@ -239,9 +241,10 @@ Tests use Node's built-in runner (`node --test`) against the compiled output in
 
 ## Roadmap
 
-Phase 1 ✅ Foundation · Phase 2 Voice · Phase 3 LLM · Phase 4 Filesystem ·
-Phase 5 Applications · Phase 6 Browser · Phase 7 UI automation · Phase 8
-WhatsApp · Phase 9 Memory · Phase 10 Developer tools · Phase 11 Vision ·
+Phase 1 ✅ Foundation · Phase 2 Voice · Phase 3 ✅ LLM · Phase 4 ✅ Filesystem ·
+Phase 5 ✅ Applications · Phase 6 ✅ Browser · Phase 7 ✅ UI automation (screen
+capture/vision fallback pending) · Phase 8 WhatsApp · Phase 9 Memory ·
+Phase 10 ✅ Developer tools (project/code tools pending) · Phase 11 Vision ·
 Phase 12 Advanced autonomy
 
 Full detail in [`TODO.md`](TODO.md).

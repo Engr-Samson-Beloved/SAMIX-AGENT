@@ -16,6 +16,7 @@ import { createAppPaths, type AppPaths } from './config/paths.js';
 import { EventBus } from './events/event-bus.js';
 import { AuditTrail } from './observability/audit.js';
 import { LoggerService, nullLogger, type Logger } from './observability/logger.js';
+import { CommandPolicy } from './security/command-policy.js';
 import { PermissionEngine } from './security/permissions.js';
 import { PathPolicy } from './security/path-policy.js';
 import { DevEnvSecretStore, type SecretStore } from './security/secrets.js';
@@ -111,6 +112,7 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
   // --- security ------------------------------------------------------------
   const permissions = new PermissionEngine();
   const pathPolicy = new PathPolicy(initial.security);
+  const commandPolicy = new CommandPolicy(initial.developer.terminal);
   const secrets = new DevEnvSecretStore();
 
   // --- tools ---------------------------------------------------------------
@@ -153,6 +155,7 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     pathPolicy,
     windows,
     desktop,
+    commandPolicy,
     cacheDir: paths.cacheDir,
     referents: () => {
       const { app } = context.referents;
@@ -255,6 +258,7 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     logger.setLevel(next.logging.level as LogLevel);
     audit.setEnabled(next.logging.auditEnabled);
     pathPolicy.update(next.security);
+    commandPolicy.update(next.developer.terminal);
     bus.emit({ type: 'config.changed', at: new Date().toISOString() });
   });
 
@@ -293,6 +297,11 @@ export function createRuntime(options: RuntimeOptions = {}): Runtime {
     status: process.platform === 'win32' ? 'ready' : 'unavailable',
     detail:
       'Playwright over the DevTools protocol: opens, reads, scrolls, clicks and captures real pages',
+  });
+  agent.setSubsystem({
+    name: 'developer',
+    status: 'ready',
+    detail: `terminal.execute + git.* — DEVELOPER mode only; allowed commands: ${initial.developer.terminal.allowedCommands.join(', ') || 'none'}`,
   });
   // Reported honestly as "not yet known": the sidecar is not started until a
   // window tool is used, so claiming either path here would be a guess. The

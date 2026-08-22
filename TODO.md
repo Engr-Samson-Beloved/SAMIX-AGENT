@@ -83,6 +83,34 @@ unticked items are refinements, not blockers.
       (§63).~~ `ModelRouter` + `classifyInstruction()`. Biased towards the
       strong model: it steps down only on positively-recognised simple
       instructions, because mis-planning costs more than 2s of latency.
+- [x] ~~**Multi-round planning (`Planner.continue`).**~~ Found by actually
+      driving the agent through natural language against a real desktop
+      window: `plan()` is one blind LLM turn, so it can never correctly call
+      `desktop.setValue`/`desktop.invoke`/`desktop.click` — their `ref` and
+      `tree` arguments do not exist until a prior `desktop.snapshot` has
+      actually run. Gemini did the honest thing (called `window.list`, then
+      stopped rather than invent a ref) and the orchestrator wrongly treated
+      that single successful step as the whole task. `Agent.run()` now loops:
+      after a batch of steps all succeed, it calls `planner.continue()` with
+      their real results attached (reusing the conversation-replay shape
+      `recover()` already had for failures) and asks whether more is needed,
+      bounded by the new `automation.maxContinuationRounds` (default 8) on top
+      of the existing `maxStepsPerTask`. A planner with no opinion (the
+      rule-based fallback) is unaffected — one round, exactly as before.
+      Confirmed live: "type X into the Message field, then check the Remember
+      me box" now runs `window.list` → `desktop.snapshot` →
+      `desktop.setValue` + `desktop.invoke` (using the real ref/tree from the
+      snapshot) → done, each write verified against real UI state. 5 new tests
+      in `agent-loop.test.ts`.
+      *Cost, measured live:* every task now pays at least one extra
+      round-trip to ask "anything else?" — ~1.3s on the fast model for a
+      trivial single-step task, more for the planner-tier model. `ModelRouter`
+      already routes a recognised-simple instruction's continuation check to
+      the fast model, which is what keeps this cheap in the common case; it
+      is not yet routed independently of the *original* instruction's
+      classification, so a complex instruction's every continuation round
+      pays planner-tier latency even once nothing but "yes/no more" remains.
+      Worth revisiting if that turns out to matter in practice — not before.
 - [x] ~~Implement `Planner.recover()` for real error recovery (spec §30).~~
       A prose-only answer during recovery becomes a give-up, never a `reply` —
       a `reply` would drive `Agent.complete()` and mark a failed task done.
@@ -207,8 +235,13 @@ Downloads folder?" is answered from a real search.
 
 ## Phase 7 — Windows UI automation
 
-**Status: windows are covered. The desktop control sidecar exists and can read
-the controls inside a window, but no tool is wired to it yet.**
+**Status: windows and the controls inside them are both covered and confirmed
+working end to end from typed natural language** — `desktop.snapshot`,
+`findElement`, `invoke`, `setValue`, `click`, `type` and `pressKey` are wired,
+registered, and (as of the `Planner.continue` fix above) actually reachable by
+the planner across a real multi-step chain, not just by direct unit/live
+checks. This status line was stale until 2026-08-22; the steps below were
+already marked done.
 
 - [x] ~~`window.{list,focus,close}` and `screen.getActiveWindow`~~ via `user32`
       P/Invoke through a constant PowerShell script (spec §15).
@@ -327,10 +360,44 @@ the controls inside a window, but no tool is wired to it yet.**
 
 ## Phase 10 — Developer tools
 
-- [ ] `terminal.execute` behind `CommandPolicy` (spec §40) — allow-listed
-      executables, argument checks, working directory, timeout, output cap.
-      Gate behind `availableInModes: ['developer']` (already supported).
-- [ ] Git and project tools.
+**Status: `terminal.execute` and the read-only git tools are done and
+confirmed live against the real repository, driven by typed natural
+language.**
+
+- [x] ~~`terminal.execute` behind `CommandPolicy` (spec §40).~~ Allow-listed
+      bare executable names (`git`, `node`, `npm`, `pnpm`, `npx` by default),
+      never a path, spawned with `shell: false` and an argv array so there is
+      no string for a shell to reinterpret. `permission: 'system'` — the one
+      level the permission engine never auto-approves in any mode, so every
+      call is confirmed with the literal command and arguments shown first.
+      A nonzero exit is reported as data (failing tests are a successful use
+      of the tool), never a tool failure; only a genuine execution problem —
+      not on the allow list, the executable does not exist, a timeout, the
+      working directory doesn't exist — is. Timeout and output-byte cap are
+      config-driven (`developer.terminal`) and live-updatable.
+      *Not the same list as `app.launch`'s `NEVER_LAUNCHABLE`* — found by
+      writing the tests: that set also refuses `node.exe`/`python.exe`,
+      which makes sense for launching a bare GUI-style app with no argument
+      visibility, but wrongly blocks the exact commands this tool needs to
+      allow, since every call here is confirmed with its arguments visible
+      before running. `CommandPolicy` has its own floor (`NEVER_ALLOWED`) —
+      real shells and standalone system-management binaries (`reg`,
+      `diskpart`, `shutdown`, `cipher`, `certutil`, …) — that no config value
+      can widen past.
+- [x] ~~Git tools.~~ `git.status`, `git.diff`, `git.log`, `git.branch` — spec
+      §22/§23's exact list. Dedicated `permission: 'read'` wrappers rather
+      than routed through `terminal.execute`, on the same "APIs over pixels"
+      reasoning the rest of the tool system uses: each runs one fixed git
+      subcommand, so it can be a plain, unconfirmed read instead of a
+      `'system'`-tier call. A nonzero exit ("not a git repository" outside
+      one) is still `ok()` — git's own honest answer, not a tool error.
+- [ ] `project.detect`, `project.open`, `code.search`, `code.read`, `code.edit`
+      (spec §23) — the rest of the Developer Mode capability list. Not
+      started; `terminal.execute` + `git.*` cover the immediately useful
+      subset ("run the tests", "check the build", "show me the last commit").
+- [ ] `git.branch` is read-only (`-vv`, listing only). Creating, switching or
+      deleting a branch would need its own tool with its own confirmation
+      story — deliberately not bundled in here.
 
 ## Phase 11 — Vision
 

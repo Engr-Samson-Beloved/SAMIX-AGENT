@@ -1,5 +1,6 @@
 import type { Logger } from '../observability/logger.js';
 import type {
+  ContinueRequest,
   PlanRequest,
   PlanResult,
   Planner,
@@ -58,6 +59,17 @@ export class HybridPlanner implements Planner {
       return { kind: 'give-up', reason: 'No recovery strategy is available.' };
     }
     return planner.recover(request);
+  }
+
+  async continue(request: ContinueRequest): Promise<PlanResult> {
+    const planner = await this.active();
+    if (!planner.continue) {
+      // The deterministic planner has no basis for this, and "reply" is what
+      // tells the orchestrator to stop asking and move straight to reporting
+      // what already succeeded — never a failure, since nothing here failed.
+      return { kind: 'reply', message: '' };
+    }
+    return planner.continue(request);
   }
 
   async summarise(request: SummaryRequest): Promise<string | undefined> {

@@ -94,6 +94,8 @@ export { RingBuffer } from './observability/ring-buffer.js';
 
 export { PathPolicy, matchesPattern, normalisePath } from './security/path-policy.js';
 export type { PathDecision, PathTrust } from './security/path-policy.js';
+export { CommandPolicy } from './security/command-policy.js';
+export type { CommandDecision } from './security/command-policy.js';
 export { PermissionEngine } from './security/permissions.js';
 export type { Decision, Effect, PermissionQuery } from './security/permissions.js';
 export { DevEnvSecretStore, EphemeralSecretStore, credentialTarget } from './security/secrets.js';
@@ -119,7 +121,7 @@ export { formatBytes, guardPath, shorthandNames, toAbsolutePath } from './tools/
 export type { GuardedPath, PathIntent } from './tools/filesystem/guard.js';
 
 // Phase 5 — applications and processes
-export { AppRegistry, discoverApps, isLaunchable } from './tools/apps/app-registry.js';
+export { AppRegistry, discoverApps, isLaunchable, NEVER_LAUNCHABLE } from './tools/apps/app-registry.js';
 export type { AppKind, DiscoveredApp } from './tools/apps/app-registry.js';
 export {
   createAppCloseTool,
@@ -207,6 +209,19 @@ export {
 export type { ClickResult, TypeResult } from './tools/desktop/tools.js';
 export { dangerousWordIn } from './security/permissions.js';
 export type { PythonCandidate, PythonSource } from './tools/desktop/python.js';
+
+// Phase 10 — developer tools (DEVELOPER mode only)
+export { createTerminalExecuteTool } from './tools/terminal/tools.js';
+export type { TerminalExecuteResult } from './tools/terminal/tools.js';
+export { run } from './tools/terminal/run.js';
+export type { RunOptions, RunOutcome } from './tools/terminal/run.js';
+export {
+  createGitBranchTool,
+  createGitDiffTool,
+  createGitLogTool,
+  createGitStatusTool,
+} from './tools/git/tools.js';
+export type { GitCommandResult } from './tools/git/tools.js';
 
 export { RpcRouter } from './rpc/router.js';
 export type { RouterResult } from './rpc/router.js';

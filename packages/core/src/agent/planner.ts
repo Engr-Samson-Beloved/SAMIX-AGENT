@@ -62,6 +62,18 @@ export interface RecoveryRequest extends PlanRequest {
   readonly attempt: number;
 }
 
+export interface ContinueRequest extends PlanRequest {
+  /**
+   * Every step executed so far this task, in order, each carrying its real
+   * result. This is what makes continuation different from the initial
+   * `plan()` call: a step whose arguments could not have been known in
+   * advance — a desktop element's `ref` and `tree` hash, an id returned by a
+   * search — is now a fact the planner can read rather than a value it would
+   * otherwise have to invent (forbidden by the planner's own rule 4).
+   */
+  readonly completedSteps: readonly TaskStep[];
+}
+
 export type PlanResult =
   | { kind: 'steps'; steps: PlannedStep[] }
   | { kind: 'reply'; message: string }
@@ -102,6 +114,23 @@ export interface Planner {
    * task, which is the safe default.
    */
   recover?(request: RecoveryRequest): Promise<PlanResult>;
+  /**
+   * Decide what to do once every step from the current plan has succeeded,
+   * now that their real results are visible.
+   *
+   * `plan()` is a single blind turn: the model commits to concrete tool
+   * arguments before anything has run, so it can never correctly call a tool
+   * whose input depends on a prior result it has not seen yet (an element
+   * `ref`, a `tree` hash, an id from a search). A capable planner recognises
+   * this and rightly stops after the steps it *could* justify — this is the
+   * orchestrator's hook to show it what happened and ask whether more is
+   * needed, turning "one blind batch" into a real observe-then-act loop.
+   *
+   * Optional: a planner with no basis for this (the deterministic one) omits
+   * it, and the orchestrator treats the task as finished after one round —
+   * exactly today's behaviour, unchanged.
+   */
+  continue?(request: ContinueRequest): Promise<PlanResult>;
   /**
    * Turn verified tool results into the sentence the user hears (spec §77's
    * REPORT stage). Optional: without it the orchestrator falls back to its own

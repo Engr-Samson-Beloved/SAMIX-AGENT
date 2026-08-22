@@ -57,7 +57,7 @@ export interface DiscoveredApp {
  *
  * Matched on the executable's base name, case-insensitively.
  */
-const NEVER_LAUNCHABLE: ReadonlySet<string> = new Set([
+export const NEVER_LAUNCHABLE: ReadonlySet<string> = new Set([
   'cmd.exe',
   'powershell.exe',
   'pwsh.exe',

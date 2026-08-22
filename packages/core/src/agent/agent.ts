@@ -279,29 +279,109 @@ export class Agent {
       publish(this.deps.bus, { type: 'agent.plan.created', taskId, steps });
       publish(this.deps.bus, { type: 'task.updated', task: this.requireTask() });
 
-      // ---- execute ------------------------------------------------------
+      // ---- execute, then observe and ask whether more is needed ---------
+      //
+      // `plan()` was one blind turn: the model committed to concrete tool
+      // arguments before anything had run, so it could not correctly call a
+      // tool whose input only exists once a prior step has produced it — an
+      // element's `ref` and `tree` hash, an id from a search. A capable model
+      // recognises this and rightly plans only as far as it can justify.
+      //
+      // So once a batch of steps has all succeeded, the loop goes back to the
+      // planner with their real results attached (`Planner.continue`) and asks
+      // whether the task is actually finished. This is what turns "one blind
+      // batch" into a real observe-then-act loop, bounded on two independent
+      // axes: total steps across every round (`maxStepsPerTask`, unchanged)
+      // and the number of rounds themselves (`maxContinuationRounds`), which
+      // is what actually limits LLM round-trips.
       this.deps.tasks.setStatus('executing');
 
       let guard = 0;
-      for (;;) {
-        if (++guard > config.automation.maxStepsPerTask * (config.automation.maxStepRetries + 2)) {
-          // Belt and braces: the per-step retry cap should make this
-          // unreachable, but an unbounded loop next to the user's filesystem
-          // deserves a second bound.
-          throw new Error('Agent loop exceeded its iteration budget.');
+      roundLoop: for (let round = 0; ; round++) {
+        for (;;) {
+          if (++guard > config.automation.maxStepsPerTask * (config.automation.maxStepRetries + 2)) {
+            // Belt and braces: the per-step retry cap should make this
+            // unreachable, but an unbounded loop next to the user's filesystem
+            // deserves a second bound.
+            throw new Error('Agent loop exceeded its iteration budget.');
+          }
+          this.token.throwIfCancelled();
+          if (Date.now() > deadline) {
+            const reason = `The task exceeded its ${Math.round(config.automation.taskTimeoutMs / 1000)}s time budget.`;
+            this.fail(err('TIMEOUT', reason).error!, reason);
+            return;
+          }
+
+          const step = this.deps.tasks.nextPendingStep();
+          if (!step) break;
+
+          const finished = await this.runStep(step, config, taskId);
+          if (finished === 'abort') return;
         }
+
+        // Every step so far succeeded (a failure would have returned 'abort'
+        // above). Stop asking once a bound is hit, or when this planner has no
+        // opinion at all (the deterministic fallback) — either way, whatever
+        // already succeeded stands and moves on to the report below.
+        if (round + 1 >= config.automation.maxContinuationRounds) break roundLoop;
+        if (!this.deps.planner.continue) break roundLoop;
+
         this.token.throwIfCancelled();
-        if (Date.now() > deadline) {
-          const reason = `The task exceeded its ${Math.round(config.automation.taskTimeoutMs / 1000)}s time budget.`;
-          this.fail(err('TIMEOUT', reason).error!, reason);
+        publish(this.deps.bus, {
+          type: 'agent.thinking',
+          note: 'checking whether the task actually needs anything else',
+        });
+
+        const completedSteps = this.requireTask().steps;
+        const continuation = await this.deps.planner.continue({
+          task: this.requireTask(),
+          mode: this.mode,
+          availableTools: this.deps.registry.availableIn(this.mode).map((t) => t.name),
+          history: this.conversation(),
+          referents: this.context.referents,
+          signal: this.token.signal,
+          completedSteps,
+        });
+
+        if (continuation.kind === 'clarify') {
+          this.complete(continuation.question);
           return;
         }
+        if (continuation.kind === 'propose') {
+          this.context.propose({
+            tool: continuation.step.tool,
+            input: continuation.step.input,
+            offer: continuation.message,
+            description: continuation.step.description,
+            taskId,
+          });
+          this.complete(continuation.message);
+          return;
+        }
+        if (continuation.kind !== 'steps' || continuation.steps.length === 0) {
+          // 'reply' or 'give-up': the planner has nothing more to add. Nothing
+          // that already succeeded is undone by that — go straight to the
+          // report below, exactly as if this had been the whole plan.
+          break roundLoop;
+        }
 
-        const step = this.deps.tasks.nextPendingStep();
-        if (!step) break;
+        const nextTotal = completedSteps.length + continuation.steps.length;
+        if (nextTotal > config.automation.maxStepsPerTask) {
+          // Unlike the identical check on the very first plan, nothing is
+          // discarded here on purpose: real, verified work has already
+          // happened this task, and a step-count guard is not a reason to
+          // report it as failed.
+          this.log.warn('continuation plan would exceed the step limit; stopping with what succeeded', {
+            wouldBe: nextTotal,
+            limit: config.automation.maxStepsPerTask,
+          });
+          break roundLoop;
+        }
 
-        const finished = await this.runStep(step, config, taskId);
-        if (finished === 'abort') return;
+        const added = toTaskSteps(continuation.steps, completedSteps.length);
+        this.deps.tasks.appendSteps(added);
+        publish(this.deps.bus, { type: 'task.updated', task: this.requireTask() });
+        this.log.info('continuation plan created', { round: round + 1, steps: added.length });
       }
 
       // ---- verify + report ----------------------------------------------

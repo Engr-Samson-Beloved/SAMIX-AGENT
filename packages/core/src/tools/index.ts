@@ -39,6 +39,7 @@ import {
   createRenameTool,
   createSearchTool,
 } from './filesystem/tools.js';
+import type { CommandPolicy } from '../security/command-policy.js';
 import { DesktopContext } from './desktop/context.js';
 import {
   createDesktopClickTool,
@@ -50,6 +51,8 @@ import {
   createDesktopTypeTool,
 } from './desktop/tools.js';
 import type { DesktopSidecar } from './desktop/sidecar.js';
+import { createGitBranchTool, createGitDiffTool, createGitLogTool, createGitStatusTool } from './git/tools.js';
+import { createTerminalExecuteTool } from './terminal/tools.js';
 import { systemGetInfoTool } from './system/get-info.js';
 import { createAgentGetStatusTool, type StatusProvider } from './system/get-status.js';
 
@@ -59,7 +62,7 @@ export { createAgentGetStatusTool } from './system/get-status.js';
 export type { SystemInfo } from './system/get-info.js';
 export type { AgentStatusReport, StatusProvider } from './system/get-status.js';
 
-export { AppRegistry, discoverApps, isLaunchable } from './apps/app-registry.js';
+export { AppRegistry, discoverApps, isLaunchable, NEVER_LAUNCHABLE } from './apps/app-registry.js';
 export type { AppKind, DiscoveredApp } from './apps/app-registry.js';
 export { closeProcess, isProcessRunning, isValidImageName, listProcesses } from './windows/processes.js';
 export type { RunningProcess } from './windows/processes.js';
@@ -92,6 +95,17 @@ export {
 } from './browser/tools.js';
 export { formatBytes, guardPath, shorthandNames, toAbsolutePath } from './filesystem/guard.js';
 export type { GuardedPath, PathIntent } from './filesystem/guard.js';
+export { createTerminalExecuteTool } from './terminal/tools.js';
+export type { TerminalExecuteResult } from './terminal/tools.js';
+export { run } from './terminal/run.js';
+export type { RunOptions, RunOutcome } from './terminal/run.js';
+export {
+  createGitBranchTool,
+  createGitDiffTool,
+  createGitLogTool,
+  createGitStatusTool,
+} from './git/tools.js';
+export type { GitCommandResult } from './git/tools.js';
 
 export interface ToolRegistryDeps {
   readonly statusProvider: StatusProvider;
@@ -121,6 +135,13 @@ export interface ToolRegistryDeps {
    * planner never hears about is one it cannot try to use.
    */
   readonly desktop?: DesktopSidecar;
+  /**
+   * Governs `terminal.execute` (Phase 10). Always constructed — unlike the
+   * desktop sidecar, there is no infrastructure here that can fail to start,
+   * so this is required rather than optional. The tool itself is still gated
+   * to DEVELOPER mode via `availableInModes`.
+   */
+  readonly commandPolicy: CommandPolicy;
 }
 
 export interface ToolSet {
@@ -209,6 +230,13 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolSet {
     erase(createScreenGetActiveWindowTool(uia) as unknown as AgentTool<never, never>),
     erase(createWindowFocusTool(apps, referents, uia) as unknown as AgentTool<never, never>),
     erase(createWindowCloseTool(apps, referents, uia) as unknown as AgentTool<never, never>),
+
+    // --- Phase 10: developer tools, DEVELOPER mode only -----------------------
+    erase(createTerminalExecuteTool(deps.commandPolicy, policy) as unknown as AgentTool<never, never>),
+    erase(createGitStatusTool(policy) as unknown as AgentTool<never, never>),
+    erase(createGitDiffTool(policy) as unknown as AgentTool<never, never>),
+    erase(createGitLogTool(policy) as unknown as AgentTool<never, never>),
+    erase(createGitBranchTool(policy) as unknown as AgentTool<never, never>),
   ]);
 
   // --- Phase 7: the controls inside those windows --------------------------

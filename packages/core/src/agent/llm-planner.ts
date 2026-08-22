@@ -7,6 +7,7 @@ import type { Logger } from '../observability/logger.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { describeReferents } from './context.js';
 import type {
+  ContinueRequest,
   ConversationTurn,
   PlanRequest,
   PlanResult,
@@ -155,6 +156,66 @@ export class LlmPlanner implements Planner {
   }
 
   // -------------------------------------------------------------------------
+  // Continuation — the observe-then-act round (see Planner.continue)
+  // -------------------------------------------------------------------------
+
+  async continue(request: ContinueRequest): Promise<PlanResult> {
+    const config = this.deps.config();
+    const tools = this.deps.registry.toLlmSchemas(request.mode);
+    const route = this.deps.router.select({
+      kind: 'plan',
+      instruction: request.task.instruction,
+      historyLength: request.history.length,
+    });
+
+    // Replay every step that has actually run, with its real result — the same
+    // shape `summarise()` uses, because this is the same idea: show the model
+    // what it could not have known when it planned. The difference is what
+    // happens next: `summarise()` asks for prose, this asks for either more
+    // calls or prose, so the loop can keep going.
+    const messages: LlmMessage[] = [
+      ...toConversationMessages(request.history),
+      { role: 'user', text: request.task.instruction },
+    ];
+    for (const step of request.completedSteps) {
+      messages.push({
+        role: 'model',
+        toolCalls: [{ id: step.id, name: step.tool, input: step.input }],
+      });
+      messages.push({
+        role: 'tool',
+        name: step.tool,
+        result: step.result?.data ?? { ok: true },
+      });
+    }
+    messages.push({
+      role: 'user',
+      text:
+        `Those calls have run, and you can now see their real results above — including anything you ` +
+        `could not have known before they ran, such as an element reference, a tree hash, or an id from ` +
+        `a search. Look at what you now know:\n\n` +
+        `  - If the task needs more tool calls, make them now using those real results. Never guess a ` +
+        `value that a result above already gave you.\n` +
+        `  - If the task is now fully accomplished, do not call any tool at all: reply in plain text ` +
+        `saying only that it can now be treated as done — a separate step writes the actual report to ` +
+        `the user from these results, so do not compose that here.`,
+    });
+
+    const system = this.buildSystemPrompt(request.mode, 'continue', request.referents);
+    const budget = this.checkContextBudget(system, messages, tools, config);
+    if (budget) return budget;
+
+    this.deps.logger.debug('continuing', {
+      model: route.model,
+      routing: route.reason,
+      tools: tools.length,
+      completedSteps: request.completedSteps.length,
+    });
+
+    return this.converse({ request, messages, system, route, tools, config, phase: 'continue' });
+  }
+
+  // -------------------------------------------------------------------------
   // Reporting (spec §77, REPORT)
   // -------------------------------------------------------------------------
 
@@ -255,7 +316,7 @@ export class LlmPlanner implements Planner {
     route: { model: string; temperature: number; maxOutputTokens: number; reason: string };
     tools: ReturnType<ToolRegistry['toLlmSchemas']>;
     config: AppConfig;
-    phase: 'plan' | 'recover';
+    phase: 'plan' | 'recover' | 'continue';
   }): Promise<PlanResult> {
     const { request, system, route, tools, phase } = args;
     const messages = [...args.messages];
@@ -318,7 +379,7 @@ export class LlmPlanner implements Planner {
       // must resolve the ambiguity first — and before real calls, so an offer is
       // never executed alongside the work it was only proposing.
       const offer = response.toolCalls.find((call) => call.name === PROPOSE_ACTION_FUNCTION);
-      if (offer && phase === 'plan') {
+      if (offer && phase !== 'recover') {
         const proposal = this.parseProposal(offer, request.mode);
         if (proposal) return proposal;
         // An unparseable offer is not worth a repair round-trip: the model was
@@ -475,7 +536,7 @@ export class LlmPlanner implements Planner {
 
   private buildSystemPrompt(
     mode: AgentMode,
-    phase: 'plan' | 'recover',
+    phase: 'plan' | 'recover' | 'continue',
     referents: PlanRequest['referents'] = {},
   ): string {
     const tools = this.deps.registry.describe(mode);
@@ -495,9 +556,15 @@ export class LlmPlanner implements Planner {
     return [
       `You are the planner inside SAMIX Agent, which automates a Windows computer for its owner.`,
       ``,
-      `Your only job is to decide which tools to call. You never perform actions yourself, and you`,
-      `never see their results in this turn — a separate execution layer runs each call, checks that`,
-      `it actually worked, and asks the user to confirm anything risky.`,
+      `Your only job is to decide which tools to call. You never perform actions yourself — a separate`,
+      `execution layer runs each call, checks that it actually worked, and asks the user to confirm`,
+      `anything risky.`,
+      phase === 'continue'
+        ? `The calls you made earlier in this task are shown below along with their real results: you are`
+        : `You do not see a call's result in the same turn you make it — the results of anything you call`,
+      phase === 'continue'
+        ? `seeing what actually happened, not planning blind.`
+        : `now will be shown to you afterwards, in a later turn, if there is more to decide.`,
       ``,
       `Current context`,
       `  local time: ${now.toISOString()}`,
@@ -550,6 +617,14 @@ export class LlmPlanner implements Planner {
             `   text — that is a valid and useful answer, and better than a plan you do not believe in.`,
           ]
         : []),
+      ...(phase === 'continue'
+        ? [
+            `10. Some steps have already run this task; their real results are shown above. Use those`,
+            `   results directly — an element reference, a tree hash, an id from a search — never a`,
+            `   value you are inferring or recalling from the instruction. If the task is fully done,`,
+            `   call no tool and say only that it is done; a later step writes the actual report.`,
+          ]
+        : []),
     ].join('\n');
   }
 
@@ -588,7 +663,7 @@ export class LlmPlanner implements Planner {
   }
 
   /** Turn a provider failure into an honest outcome rather than a stack trace. */
-  private fromProviderError(cause: unknown, phase: 'plan' | 'recover'): PlanResult {
+  private fromProviderError(cause: unknown, phase: 'plan' | 'recover' | 'continue'): PlanResult {
     const error =
       cause instanceof LlmError ? cause : new LlmError('server', String(cause), { cause });
 

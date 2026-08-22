@@ -167,9 +167,47 @@ export const AutomationConfigSchema = z.object({
   maxStepsPerTask: z.number().int().positive().max(100).default(25),
   maxStepRetries: z.number().int().nonnegative().max(5).default(2),
   taskTimeoutMs: z.number().int().positive().default(300_000),
+  /**
+   * How many times the agent may go back to the planner after a batch of
+   * steps all succeeded, showing it their real results, to ask whether more
+   * is needed (see `Planner.continue`). Bounds LLM round-trips per task
+   * independently of `maxStepsPerTask`, since a chain of desktop-element
+   * interactions can legitimately need one call per round (snapshot, then
+   * act on exactly what it just read).
+   */
+  maxContinuationRounds: z.number().int().nonnegative().max(20).default(8),
   desktop: sectionDefault(DesktopAutomationConfigSchema),
 });
 export type AutomationConfig = z.infer<typeof AutomationConfigSchema>;
+
+/**
+ * `terminal.execute` and the git tools (spec §22, §23, §40) — DEVELOPER-mode
+ * only, per `availableInModes`.
+ *
+ * The safety model here is structural rather than a blacklist of dangerous
+ * commands: `allowedCommands` is a closed, author-controlled list of bare
+ * executable names (never a path, never a shell), so there is no string for a
+ * shell to reinterpret and no way to widen this into "run anything" from
+ * config alone. `NEVER_LAUNCHABLE` (shared with `app.launch`) is checked on
+ * top and cannot be overridden by this list, however it is edited.
+ */
+export const TerminalConfigSchema = z.object({
+  /**
+   * Bare names only — resolved the same way any command on PATH would be,
+   * never by a path this config supplies. Defaults to the toolchain this
+   * project itself already depends on.
+   */
+  allowedCommands: z.array(z.string()).default(['git', 'node', 'npm', 'pnpm', 'npx']),
+  timeoutMs: z.number().int().positive().max(600_000).default(60_000),
+  /** Captured output is truncated past this and the truncation is reported. */
+  maxOutputBytes: z.number().int().positive().max(5_000_000).default(200_000),
+});
+export type TerminalConfig = z.infer<typeof TerminalConfigSchema>;
+
+export const DeveloperConfigSchema = z.object({
+  terminal: sectionDefault(TerminalConfigSchema),
+});
+export type DeveloperConfig = z.infer<typeof DeveloperConfigSchema>;
 
 export const SecurityConfigSchema = z.object({
   /**
@@ -244,6 +282,7 @@ export const AppConfigSchema = z.object({
   voice: sectionDefault(VoiceConfigSchema),
   tts: sectionDefault(TtsConfigSchema),
   automation: sectionDefault(AutomationConfigSchema),
+  developer: sectionDefault(DeveloperConfigSchema),
   security: sectionDefault(SecurityConfigSchema),
   logging: sectionDefault(LoggingConfigSchema),
   ui: sectionDefault(UiConfigSchema),
@@ -265,6 +304,7 @@ export const AppConfigPatchSchema = z.object({
   voice: VoiceConfigSchema.partial().optional(),
   tts: TtsConfigSchema.partial().optional(),
   automation: AutomationConfigSchema.partial().optional(),
+  developer: DeveloperConfigSchema.partial().optional(),
   security: SecurityConfigSchema.partial().optional(),
   logging: LoggingConfigSchema.partial().optional(),
   ui: UiConfigSchema.partial().optional(),
