@@ -8,7 +8,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Phases 3 through 7 and 10: the agent plans with Google Gemini, acts on the
 machine, can now **read the web and the desktop back**, and — new — run its
-own project's toolchain. 2 tools became 38.
+own project's toolchain, detect and open a project, and search and edit
+source code. 2 tools became 43. Phase 10 is now complete against spec §23.
+
+### Added — Phase 10: project and code tools
+
+- **`project.detect`.** Reports every project kind a folder matches — Node,
+  Rust, Python, Go, .NET, more than one for a mixed repo — its declared name,
+  package manager and `package.json` scripts, and whether it is a git
+  repository. Structural only: no name resolution, since nothing maps "my
+  SkoolConnect project" to a path yet. Confirmed live against this repo:
+  correctly reported Node/pnpm and its own `test` script.
+- **`project.open`.** Opens a project folder in an editor (VS Code by
+  default) — deliberately the one place that passes an argument to a launched
+  application, unlike `app.launch`, because "open my project" means opening
+  scoped to that folder, not opening blank. Reuses `app.launch`'s own launch
+  and verify helpers rather than duplicating them.
+- **`code.search`.** Content search — distinct from `filesystem.search`,
+  which finds files by name. Skips dependency and build directories and
+  binary files automatically.
+- **`code.read`.** Line-numbered file output, optionally bounded to a range —
+  what a planner needs to quote exact text at an exact line back to
+  `code.edit`, which `filesystem.readTextFile`'s plain blob does not give it.
+- **`code.edit`.** The one new tool that writes: replaces one exact, unique
+  block of *existing* text with new text, refusing outright if the text is
+  missing or appears more than once rather than guessing which occurrence
+  was meant — the same contract Claude Code's own edit tool uses. Verified by
+  re-reading the file afterwards and comparing a content hash, not by
+  trusting the write call not to have thrown. Cannot create a new file.
+  Confirmed live end to end: "change the greeting from 'Hello, ' to
+  'Hi there, '" read the file, quoted the real text back exactly, asked for
+  confirmation, and the file matched exactly afterwards.
 
 ### Added — Phase 10: developer tools
 

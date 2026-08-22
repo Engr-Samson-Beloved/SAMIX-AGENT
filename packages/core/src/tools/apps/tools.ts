@@ -45,7 +45,7 @@ import {
  * the one place the agent starts a program the user named, and a shell would
  * make the executable path itself a command line.
  */
-function launchDetached(executablePath: string, args: readonly string[]): number | undefined {
+export function launchDetached(executablePath: string, args: readonly string[]): number | undefined {
   const child = spawn(executablePath, [...args], {
     detached: true,
     stdio: 'ignore',
@@ -65,7 +65,7 @@ function launchDetached(executablePath: string, args: readonly string[]): number
  * work; the PID is gone. Asking "is a process with this image name running?"
  * answers the question the user actually cares about.
  */
-async function verifyRunning(app: DiscoveredApp, timeoutMs: number): Promise<Verification> {
+export async function verifyRunning(app: DiscoveredApp, timeoutMs: number): Promise<Verification> {
   const deadline = Date.now() + Math.min(timeoutMs, 10_000);
   do {
     try {

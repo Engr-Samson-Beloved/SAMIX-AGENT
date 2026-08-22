@@ -222,6 +222,10 @@ export {
   createGitStatusTool,
 } from './tools/git/tools.js';
 export type { GitCommandResult } from './tools/git/tools.js';
+export { createProjectDetectTool, createProjectOpenTool } from './tools/project/tools.js';
+export type { ProjectInfo, ProjectKind, ProjectOpenResult } from './tools/project/tools.js';
+export { createCodeEditTool, createCodeReadTool, createCodeSearchTool } from './tools/code/tools.js';
+export type { CodeMatch } from './tools/code/tools.js';
 
 export { RpcRouter } from './rpc/router.js';
 export type { RouterResult } from './rpc/router.js';

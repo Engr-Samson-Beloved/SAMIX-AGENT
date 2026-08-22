@@ -360,9 +360,10 @@ already marked done.
 
 ## Phase 10 — Developer tools
 
-**Status: `terminal.execute` and the read-only git tools are done and
-confirmed live against the real repository, driven by typed natural
-language.**
+**Status: complete against spec §23's list.** `terminal.execute`, the git
+tools, `project.detect`/`project.open` and `code.search`/`code.read`/
+`code.edit` are all done and confirmed live, driven by typed natural
+language, against the real repository and a real file edit.
 
 - [x] ~~`terminal.execute` behind `CommandPolicy` (spec §40).~~ Allow-listed
       bare executable names (`git`, `node`, `npm`, `pnpm`, `npx` by default),
@@ -391,13 +392,49 @@ language.**
       subcommand, so it can be a plain, unconfirmed read instead of a
       `'system'`-tier call. A nonzero exit ("not a git repository" outside
       one) is still `ok()` — git's own honest answer, not a tool error.
-- [ ] `project.detect`, `project.open`, `code.search`, `code.read`, `code.edit`
-      (spec §23) — the rest of the Developer Mode capability list. Not
-      started; `terminal.execute` + `git.*` cover the immediately useful
-      subset ("run the tests", "check the build", "show me the last commit").
+- [x] ~~`project.detect`.~~ Structural detection only — `package.json`,
+      `Cargo.toml`, `pyproject.toml`/`requirements.txt`/`setup.py`, `go.mod`,
+      `.csproj`/`.sln`, `.git` — no memory or name resolution, because
+      nothing resolves "my SkoolConnect project" to a path yet (Phase 9).
+      Reports every kind it finds, not just the first, for a repo that mixes
+      toolchains — confirmed live against this repo itself (`node` + `pnpm` +
+      its own `test` script, correctly, from the root `package.json`).
+- [x] ~~`project.open`.~~ A narrow, deliberate exception to `app.launch`'s
+      "never takes an argument" rule (spec keeps that invariant elsewhere):
+      opens an editor *with* the project folder, which is what "open my
+      project" means and `app.launch` structurally cannot do. Reuses
+      `app.launch`'s own `launchDetached`/`verifyRunning` rather than
+      duplicating them.
+- [x] ~~`code.search`.~~ Content search, distinct from `filesystem.search`
+      (name search) — skips dependency/build directories and binary files by
+      the same NUL-byte test `filesystem.readTextFile` uses.
+- [x] ~~`code.read`.~~ Line-numbered output, optionally range-bounded, so a
+      planner about to call `code.edit` has exact text with exact line
+      numbers to quote back — not a duplicate of `filesystem.readTextFile`,
+      which returns an unnumbered blob.
+- [x] ~~`code.edit`.~~ The one tool here that writes, deliberately narrow:
+      an exact, unique block of *existing* text and its replacement, refused
+      if the text is missing or ambiguous rather than guessing — the same
+      contract Claude Code's own edit tool uses, for the same reason (forces
+      whatever proposes the edit to have actually read the file, and bounds
+      one call's damage to one located block). Cannot create a new file —
+      `filesystem.writeTextFile` is still the missing tool for that. Verified
+      by re-reading the file and comparing a hash of the expected content
+      against what is actually on disk, not by trusting the write call not to
+      have thrown. Confirmed live: "change the greeting from 'Hello, ' to
+      'Hi there, '" read the file, quoted the exact existing text back,
+      asked for confirmation (`permission: 'write'`), and the file matched
+      exactly afterwards.
 - [ ] `git.branch` is read-only (`-vv`, listing only). Creating, switching or
       deleting a branch would need its own tool with its own confirmation
       story — deliberately not bundled in here.
+- [ ] `code.edit` cannot create a new file (see above) — pairs naturally with
+      the still-missing `filesystem.writeTextFile` (Phase 4).
+- [ ] No enforcement that `code.edit` was preceded by a `code.read` of the
+      same file in the same task. The exact-unique-match requirement already
+      forces the caller to know the real text, which in practice requires
+      having read it, but nothing *proves* that the way Claude Code's own
+      harness does. Worth revisiting only if this turns out to matter.
 
 ## Phase 11 — Vision
 

@@ -8,12 +8,12 @@ tools, **verifies that they actually happened**, and reports what it did.
 > runtime, safety model and verification pipeline are built and tested
 > (Phase 1); the agent plans with Google Gemini through a real observe-then-act
 > loop, not a single blind turn (Phase 3); and it acts on the machine through
-> 38 tools — files, applications, processes, a real browser it can *read* as
+> 43 tools — files, applications, processes, a real browser it can *read* as
 > well as drive, the windows on your desktop and the controls inside them, and
-> — DEVELOPER mode only — its own project's toolchain and git (Phases 4–7,
-> 10). Still missing: voice (Phase 2), typing into web forms (Phase 6), a
-> screenshot/vision fallback (Phase 7), messaging (Phase 8) and memory that
-> survives a restart (Phase 9).
+> — DEVELOPER mode only — its own project's toolchain, git, and reading,
+> searching and editing source code (Phases 4–7, 10). Still missing: voice
+> (Phase 2), typing into web forms (Phase 6), a screenshot/vision fallback
+> (Phase 7), messaging (Phase 8) and memory that survives a restart (Phase 9).
 > Start here: **[docs/USING-SAMIX.md](docs/USING-SAMIX.md)**.
 
 ---
@@ -244,8 +244,7 @@ Tests use Node's built-in runner (`node --test`) against the compiled output in
 Phase 1 ✅ Foundation · Phase 2 Voice · Phase 3 ✅ LLM · Phase 4 ✅ Filesystem ·
 Phase 5 ✅ Applications · Phase 6 ✅ Browser · Phase 7 ✅ UI automation (screen
 capture/vision fallback pending) · Phase 8 WhatsApp · Phase 9 Memory ·
-Phase 10 ✅ Developer tools (project/code tools pending) · Phase 11 Vision ·
-Phase 12 Advanced autonomy
+Phase 10 ✅ Developer tools · Phase 11 Vision · Phase 12 Advanced autonomy
 
 Full detail in [`TODO.md`](TODO.md).
 

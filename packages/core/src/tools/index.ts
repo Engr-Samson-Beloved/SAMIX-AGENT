@@ -51,7 +51,9 @@ import {
   createDesktopTypeTool,
 } from './desktop/tools.js';
 import type { DesktopSidecar } from './desktop/sidecar.js';
+import { createCodeEditTool, createCodeReadTool, createCodeSearchTool } from './code/tools.js';
 import { createGitBranchTool, createGitDiffTool, createGitLogTool, createGitStatusTool } from './git/tools.js';
+import { createProjectDetectTool, createProjectOpenTool } from './project/tools.js';
 import { createTerminalExecuteTool } from './terminal/tools.js';
 import { systemGetInfoTool } from './system/get-info.js';
 import { createAgentGetStatusTool, type StatusProvider } from './system/get-status.js';
@@ -106,6 +108,10 @@ export {
   createGitStatusTool,
 } from './git/tools.js';
 export type { GitCommandResult } from './git/tools.js';
+export { createProjectDetectTool, createProjectOpenTool } from './project/tools.js';
+export type { ProjectInfo, ProjectKind, ProjectOpenResult } from './project/tools.js';
+export { createCodeEditTool, createCodeReadTool, createCodeSearchTool } from './code/tools.js';
+export type { CodeMatch } from './code/tools.js';
 
 export interface ToolRegistryDeps {
   readonly statusProvider: StatusProvider;
@@ -237,6 +243,11 @@ export function createToolRegistry(deps: ToolRegistryDeps): ToolSet {
     erase(createGitDiffTool(policy) as unknown as AgentTool<never, never>),
     erase(createGitLogTool(policy) as unknown as AgentTool<never, never>),
     erase(createGitBranchTool(policy) as unknown as AgentTool<never, never>),
+    erase(createProjectDetectTool(policy) as unknown as AgentTool<never, never>),
+    erase(createProjectOpenTool(apps, policy) as unknown as AgentTool<never, never>),
+    erase(createCodeSearchTool(policy) as unknown as AgentTool<never, never>),
+    erase(createCodeReadTool(policy) as unknown as AgentTool<never, never>),
+    erase(createCodeEditTool(policy) as unknown as AgentTool<never, never>),
   ]);
 
   // --- Phase 7: the controls inside those windows --------------------------
